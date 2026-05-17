@@ -16,7 +16,17 @@ final class AVIOReader: @unchecked Sendable {
 
     private let url: URL
     private let extraHeaders: [String: String]
-    private let session: URLSession
+    /// Shared config blueprint. Each `fetchChunk` builds a fresh
+    /// ephemeral `URLSession` from this config and invalidates it
+    /// after its single request returns. That release pattern is the
+    /// fix for the 3 MB/sec leak: URLSession keeps response data
+    /// alive in its internal completed-task pool until the session
+    /// itself is invalidated, so a long-lived session over many
+    /// chunk fetches steadily accumulates 1 MB per completed task
+    /// (sized to our `chunkSize`). Per-request session brings that
+    /// to zero. The streaming download path already uses this
+    /// pattern (see `streamDownloadSync`).
+    private let sessionConfig: URLSessionConfiguration
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
 
@@ -62,7 +72,7 @@ final class AVIOReader: @unchecked Sendable {
         config.timeoutIntervalForResource = 60
         config.httpMaximumConnectionsPerHost = 2
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        self.session = URLSession(configuration: config)
+        self.sessionConfig = config
     }
 
     /// Apply the caller-supplied extra headers to a request. Used by
@@ -150,13 +160,9 @@ final class AVIOReader: @unchecked Sendable {
         streamLock.unlock()
         streamDataReady.signal()
 
-        session.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
-        }
-        // Drop all internal task state + buffered dispatch_data so the
-        // pool gets returned to the system instead of lingering past the
-        // playback session.
-        session.finishTasksAndInvalidate()
+        // Per-request URLSessions are invalidated in syncRequest itself,
+        // so there's no long-lived session here to clean up. Streaming
+        // mode owns its own URLSession lifecycle inside streamDownloadSync.
     }
 
     // MARK: - Read (called by FFmpeg on demux thread)
@@ -482,6 +488,15 @@ final class AVIOReader: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var result: (Data, URLResponse)?
         nonisolated(unsafe) var error: Error?
+
+        // Fresh URLSession per request so its task pool can be released
+        // immediately via finishTasksAndInvalidate() once we're done.
+        // Reusing a long-lived session leaks ~chunkSize bytes per
+        // completed task into URLSession's internal completed-task
+        // cache, scaling to ~3 MB/sec on 25 Mbps content over a 15 min
+        // session.
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.finishTasksAndInvalidate() }
 
         let task = session.dataTask(with: request) { d, r, e in
             if let e = e {
