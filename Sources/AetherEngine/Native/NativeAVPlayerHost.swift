@@ -367,9 +367,17 @@ final class NativeAVPlayerHost {
             }
         }
 
-        if let start = startPosition, start > 0 {
-            seek(to: start)
-        }
+        // Always issue an explicit seek so AVPlayer doesn't fall back
+        // to its EVENT-playlist live-edge default. For VOD this is a
+        // no-op (default start is already time 0); for the sliding-
+        // window EVENT path it's what makes replay-from-beginning land
+        // at 0:00 instead of at the end of the initial visible window
+        // (~2 min in for a 30-segment initialFillSegments window).
+        // EXT-X-START:TIME-OFFSET=0 in the playlist is the spec-level
+        // hint but isn't enough on its own — AVPlayer treats EVENT
+        // playlists as "start near the live edge" unless the caller
+        // explicitly seeks first.
+        seek(to: startPosition ?? 0)
     }
 
     /// Release the AVPlayerItem so a follow-up `load(...)` starts
