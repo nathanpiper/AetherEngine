@@ -1682,24 +1682,19 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         }
     }
 
-    /// Snapshot of (visibleHighWater + 1, refreshCounter, endlistAdded)
-    /// captured atomically. HLSLocalServer calls this once at the top
-    /// of buildMediaPlaylist; the rest of that function uses the
-    /// snapshot so segmentCount can't drift mid-build.
+    /// Atomic snapshot the playlist build reads from. Now that we're
+    /// back on .vod playlistType the sliding-window state is dormant
+    /// (visibleHighWater is still tracked for future EVENT revival,
+    /// but the snapshot reports the full segment count so AVPlayer
+    /// sees the complete playlist with a correct asset.duration).
+    /// Without this fix the snapshot was returning visibleHighWater+1
+    /// (=31 at session start), causing AVPlayer to think the asset
+    /// was 2:13 long and stop playback at that point.
     func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool) {
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
-        if !endlistAdded {
-            let target = visibleHighWater + Self.growthPerRefresh
-            if target >= segments.count - 1 {
-                visibleHighWater = segments.count - 1
-                endlistAdded = true
-            } else {
-                visibleHighWater = target
-            }
-        }
-        return (visibleHighWater + 1, refreshCounter, endlistAdded)
+        return (segments.count, refreshCounter, false)
     }
 
     // MARK: - HLSSegmentProvider
