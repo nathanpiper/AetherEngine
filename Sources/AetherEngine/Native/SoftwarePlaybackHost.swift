@@ -58,7 +58,12 @@ final class SoftwarePlaybackHost {
     // MARK: - Internals
 
     private let renderer: SampleBufferRenderer
-    private let videoDecoder: SoftwareVideoDecoder
+    /// Video decoder. Swapped per codec at `load()` time:
+    /// `SoftwareVideoDecoder` for AV1 / VP9 (libavcodec / dav1d), and
+    /// `HardwareVideoDecoder` for HEVC (VTDecompressionSession HW).
+    /// The protocol is `VideoDecodingPipeline` so the demux loop
+    /// stays codec-agnostic.
+    private var videoDecoder: any VideoDecodingPipeline
     private var audioDecoder: AudioDecoder?
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
@@ -125,6 +130,8 @@ final class SoftwarePlaybackHost {
 
     init() {
         self.renderer = SampleBufferRenderer()
+        // Default to the software decoder; load() swaps it for the
+        // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
     }
 
@@ -146,6 +153,26 @@ final class SoftwarePlaybackHost {
             throw HostError.noVideoStream
         }
         self.videoStreamIndex = dem.videoStreamIndex
+
+        // Pick the right decoder for the source codec. HEVC routes
+        // to VTDecompressionSession (HW); AV1 / VP9 / anything else
+        // stays on libavcodec via SoftwareVideoDecoder. The current
+        // instance is replaced wholesale so the previous decoder's
+        // state cannot bleed into the new session.
+        if let codecpar = vStream.pointee.codecpar,
+           codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+            videoDecoder.close()
+            videoDecoder = HardwareVideoDecoder()
+            EngineLog.emit(
+                "[SWHost] selected HardwareVideoDecoder (VT HEVC) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
+                category: .engine
+            )
+        } else if !(videoDecoder is SoftwareVideoDecoder) {
+            // Restoring the software default if a previous load left
+            // a HW decoder in place and this load isn't HEVC.
+            videoDecoder.close()
+            videoDecoder = SoftwareVideoDecoder()
+        }
 
         try videoDecoder.open(stream: vStream) { [weak self] pixelBuffer, pts, hdr10PlusData in
             // Decoder callback fires on the demux thread. SampleBufferRenderer
@@ -377,7 +404,7 @@ final class SoftwarePlaybackHost {
     /// `didReachEnd` mirror.
     nonisolated private static func runDemuxLoop(
         demuxer: Demuxer,
-        videoDecoder: SoftwareVideoDecoder,
+        videoDecoder: any VideoDecodingPipeline,
         videoStreamIndex: Int32,
         audioDecoder: AudioDecoder?,
         audioOutput: AudioOutput?,

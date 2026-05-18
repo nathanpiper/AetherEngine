@@ -23,7 +23,7 @@ import Libavutil
 /// Same public surface as `SoftwareVideoDecoder` (open / decode /
 /// flush / close + onFrame + onFirstHDR10PlusDetected) so the host
 /// can swap implementations without rewiring the demux loop.
-final class HardwareVideoDecoder: @unchecked Sendable {
+final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     // MARK: - Public surface (mirrors SoftwareVideoDecoder)
 

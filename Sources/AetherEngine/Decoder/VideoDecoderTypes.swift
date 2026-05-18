@@ -1,6 +1,8 @@
 import Foundation
 import CoreMedia
 import CoreVideo
+import Libavformat
+import Libavcodec
 
 /// Callback type for decoded video frames.
 ///
@@ -9,6 +11,22 @@ import CoreVideo
 /// `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects. Nil for
 /// non-HDR10+ streams.
 typealias DecodedFrameHandler = (CVPixelBuffer, CMTime, Data?) -> Void
+
+/// Common surface for the non-AVPlayer playback host's video decoder.
+/// Both `SoftwareVideoDecoder` (libavcodec, used for AV1 / VP9) and
+/// `HardwareVideoDecoder` (VTDecompressionSession, used for HEVC)
+/// conform; the host swaps the implementation per codec at load time
+/// without changing the demux-loop wiring.
+protocol VideoDecodingPipeline: AnyObject {
+    var onFrame: DecodedFrameHandler? { get set }
+    var onFirstHDR10PlusDetected: (() -> Void)? { get set }
+    var skipUntilPTS: CMTime? { get set }
+
+    func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws
+    func decode(packet: UnsafeMutablePointer<AVPacket>)
+    func flush()
+    func close()
+}
 
 enum VideoDecoderError: Error, LocalizedError {
     case noCodecParameters

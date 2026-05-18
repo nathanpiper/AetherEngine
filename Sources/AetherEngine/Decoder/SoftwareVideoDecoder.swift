@@ -12,7 +12,7 @@ import Libswscale
 /// Uses sws_scale (SIMD-optimized) for YUV→NV12/P010 conversion
 /// instead of manual per-pixel loops. This is critical for AV1
 /// where decode + conversion must hit 24fps at 1080p.
-final class SoftwareVideoDecoder: @unchecked Sendable {
+final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
     // FFmpeg 8.x exposes `SwsContext` as a real struct in Swift, where 7.x
