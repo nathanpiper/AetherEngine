@@ -506,20 +506,47 @@ final class HLSLocalServer: @unchecked Sendable {
         // which still allowed caching. For loopback HLS the cache is
         // pure overhead: the segment is already in our SegmentCache,
         // and AVPlayer maintains its own forward / backward window
-        // separately. Saving the third copy was a likely contributor
-        // to the ~3.8 MB/sec RSS growth that survived the per-frame
-        // HDR fix on Sodalite Build 165's long DV 8.1 SDR session.
+        // separately.
         let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\n"
-        var payload = Data(header.utf8)
-        payload.append(data)
+        let headerData = Data(header.utf8)
 
         EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)", category: .hlsServer)
 
-        connection.send(content: payload, completion: .contentProcessed { [weak self] error in
+        // Send header and content as two separate frames with
+        // isComplete=false on the header and isComplete=true on the
+        // content. The previous implementation concatenated them via
+        // `Data.append(_:)`, which on a value-type Data copies the
+        // content bytes into payload's own backing buffer. When
+        // `data` is mmap-backed (the segment-cache disk path), the
+        // append force-materialises the entire segment into Swift
+        // heap before send. At 8-17 MB per segment and one served
+        // every ~6 s of playback that's exactly the source-bitrate-
+        // proportional RSS growth we kept measuring (3 MB/sec
+        // sustained, OOM at 8-10 min). DrHurt's hypothesis on
+        // AetherEngine#4 was on point.
+        //
+        // Splitting the send lets NWConnection see the mmap-backed
+        // `Data` directly. Network.framework retains a strong ref
+        // to content until the completion fires, then drops it; no
+        // user-space materialisation in the meantime.
+        connection.send(content: headerData,
+                        contentContext: .defaultMessage,
+                        isComplete: false,
+                        completion: .contentProcessed { [weak self] error in
             if let error = error {
-                EngineLog.emit("[HLSLocalServer] send failed for \(path): \(error)", category: .hlsServer)
+                EngineLog.emit("[HLSLocalServer] send header failed for \(path): \(error)", category: .hlsServer)
+                self?.readRequest(connection)
+                return
             }
-            self?.readRequest(connection)
+            connection.send(content: data,
+                            contentContext: .defaultMessage,
+                            isComplete: true,
+                            completion: .contentProcessed { [weak self] error in
+                if let error = error {
+                    EngineLog.emit("[HLSLocalServer] send body failed for \(path): \(error)", category: .hlsServer)
+                }
+                self?.readRequest(connection)
+            })
         })
     }
 
