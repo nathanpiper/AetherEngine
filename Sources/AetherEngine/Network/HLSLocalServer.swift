@@ -435,6 +435,17 @@ final class HLSLocalServer: @unchecked Sendable {
         case .vod:   lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
         case .event: lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
         }
+        // EVENT playlists default to the live edge unless an explicit
+        // start point is declared. Without this, AVPlayer interprets
+        // a startPosition=nil load (replay-from-beginning button) as
+        // "start at the last segment" and the user lands ~10 s before
+        // the end. EXT-X-START:TIME-OFFSET=0,PRECISE=YES pins the
+        // default start to the playlist origin so caller-side seeks
+        // (resume position, replay) keep working the same way they
+        // did for VOD.
+        if provider.playlistType == .event {
+            lines.append("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
+        }
         lines.append("#EXT-X-MAP:URI=\"init.mp4\"")
         for i in 0..<count {
             let dur = provider.segmentDuration(at: i)
