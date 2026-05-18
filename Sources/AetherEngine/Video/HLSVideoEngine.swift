@@ -1125,6 +1125,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// bytes that fed AVPlayer through stream-copy under the old
     /// architecture now fail header write here too — the fix on both
     /// sides is the same FLAC bridge fallback.
+    /// DIAGNOSTIC TOGGLE: when true, the audio-cascade short-circuits
+    /// to the video-only fallback without attempting stream-copy or
+    /// the FLAC bridge. Used to isolate audio's contribution to the
+    /// long-session RSS growth on 4K HDR HEVC. With this flag on the
+    /// muxer emits a video-only fragment and AVPlayer renders silently.
+    /// REVERT to `false` after the test session.
+    private static let DIAG_DISABLE_AUDIO_FOR_LEAK_TEST = true
+
     private func buildProducerWithAudioCascade(
         preferBridge: Bool,
         streamCopyAudio: HLSSegmentProducer.AudioConfig?,
@@ -1132,6 +1140,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceAudioStream: UnsafeMutablePointer<AVStream>?,
         audioHLSCodecs: inout String?
     ) throws -> HLSSegmentProducer {
+        if Self.DIAG_DISABLE_AUDIO_FOR_LEAK_TEST {
+            EngineLog.emit(
+                "[HLSVideoEngine] DIAG: audio disabled — short-circuit to video-only "
+                + "(leak isolation test, revert DIAG_DISABLE_AUDIO_FOR_LEAK_TEST after)",
+                category: .session
+            )
+            self.savedAudioConfig = nil
+            self.audioBridge = nil
+            audioHLSCodecs = nil
+            self.audioPipelineDescription = "DIAG: audio disabled"
+            return try makeProducer(baseIndex: 0)
+        }
         // Detect if the source is EAC3+JOC Atmos so we can flag any
         // stream-copy → FLAC-bridge fallback as an Atmos downgrade.
         // EAC3 profile=30 is the JOC marker libavformat's demuxer sets
