@@ -453,10 +453,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// us race more than `bufferAheadSegments` past the player's
     /// declared target).
     ///
+    /// FORWARD-ONLY: callers may pass a `targetIdx` lower than the
+    /// current muxer's segment when a packet's computed segment lags
+    /// the producer's actual progress (HEVC leading B-frames after a
+    /// CRA have PTS in the previous segment; FLAC bridge can emit
+    /// packets a few frames behind the FIFO read cursor). Routing
+    /// those packets backwards would finalize the current muxer
+    /// prematurely and let `cache.adopt` overwrite the already-good
+    /// segment with a partial one. Clamp upward: route the late
+    /// packet into the current muxer instead. Tiny audio / B-frame
+    /// timing offset at the boundary is within AVPlayer's tolerance.
+    ///
     /// Returns the active muxer, or `nil` if a stop was requested
     /// during the backpressure wait or a new muxer alloc failed.
     private func ensureMuxer(forSegmentIndex targetIdx: Int) -> MP4SegmentMuxer? {
-        if currentMuxer?.segmentIndex == targetIdx, let m = currentMuxer { return m }
+        let effectiveIdx = max(targetIdx, currentMuxerSegmentIndex)
+        if currentMuxer?.segmentIndex == effectiveIdx, let m = currentMuxer { return m }
 
         // Finalize the existing muxer first so its bytes land in the
         // cache before the producer races into the next segment.
@@ -470,7 +482,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // ahead of AVPlayer's declared target. The cache exposes a
         // condvar-based highwater wait we poll in short chunks so
         // `stop()` can shut us down promptly.
-        let backpressureTarget = targetIdx - Self.bufferAheadSegments
+        let backpressureTarget = effectiveIdx - Self.bufferAheadSegments
         while !checkShouldStop() {
             if cache.awaitFetchHighWater(reaching: backpressureTarget, timeout: 1.0) { break }
         }
@@ -489,7 +501,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let muxer: MP4SegmentMuxer
         do {
             muxer = try MP4SegmentMuxer(
-                segmentIndex: targetIdx,
+                segmentIndex: effectiveIdx,
                 sessionDir: cache.sessionDir,
                 video: muxerVideo,
                 audio: muxerAudio,
@@ -510,14 +522,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         } catch {
             EngineLog.emit(
-                "[HLSSegmentProducer] muxer alloc for seg-\(targetIdx) failed: \(error)",
+                "[HLSSegmentProducer] muxer alloc for seg-\(effectiveIdx) failed: \(error)",
                 category: .session
             )
             return nil
         }
 
         currentMuxer = muxer
-        currentMuxerSegmentIndex = targetIdx
+        currentMuxerSegmentIndex = effectiveIdx
         return muxer
     }
 
@@ -578,16 +590,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// to time out on its own.
     func stop() {
         stateLock.lock()
-        let wasAlreadyStopped = shouldStop
         shouldStop = true
         stateLock.unlock()
         cache.wakeWaiters()
-        if !wasAlreadyStopped {
-            EngineLog.emit("[HLSSegmentProducer] stop() called — caller stack:", category: .session)
-            for (i, sym) in Thread.callStackSymbols.prefix(10).enumerated() {
-                EngineLog.emit("[HLSSegmentProducer]   stop#\(i) \(sym)", category: .session)
-            }
-        }
     }
 
     /// Thread-safe read of `shouldStop`. Used by the dispatchSinkOutput
@@ -1022,10 +1027,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         )
                     }
                     if let prev = pendingVideoPkt {
-                        // Determine which segment `prev` belongs to
-                        // (by its source pts) and ensure the muxer for
-                        // that segment is active before writing.
-                        let prevSeg = segmentIndex(forSourcePts: prev.pointee.pts)
+                        // Determine which segment `prev` belongs to.
+                        // Use DTS, not PTS — HEVC open-GOP CRA emits
+                        // leading B-frames whose display PTS sits in
+                        // the previous segment (PTS < CRA.pts) even
+                        // though their decode order is in the current
+                        // segment. DTS is monotonic in decode order
+                        // and segment boundaries (= IRAP keyframes)
+                        // have DTS == PTS, so DTS-based lookup matches
+                        // the segmentPlan exactly without the B-frame
+                        // reorder false-positive.
+                        let prevSeg = segmentIndex(forSourcePts: prev.pointee.dts)
                         if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
                             finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, muxer: muxer)
                             bumpPacketsWritten()
@@ -1119,7 +1131,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // produces a tail-correct `trun` for the final fragment of
         // the source.
         if let prev = pendingVideoPkt {
-            let prevSeg = segmentIndex(forSourcePts: prev.pointee.pts)
+            // DTS-based lookup mirrors the in-loop site above; see
+            // its comment for why this isn't `prev.pointee.pts`.
+            let prevSeg = segmentIndex(forSourcePts: prev.pointee.dts)
             if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
                 finalizeAndWriteVideo(prev, nextDts: nil, muxer: muxer)
                 bumpPacketsWritten()
