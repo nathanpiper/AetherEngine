@@ -869,17 +869,13 @@ final class HLSLocalServer: @unchecked Sendable {
                                             subResourceBaseURL: subResourceBaseURL)
     }
 
-    /// Public static playlist builders. Used by the
-    /// `EngineResourceLoaderDelegate` to generate the same playlist
-    /// text the HTTP server would have served, without needing a live
-    /// `HLSLocalServer` instance. Pure functions of the provider state.
+    /// Public static playlist builders. Pure functions of the provider
+    /// state, callable without a live `HLSLocalServer` instance.
     ///
-    /// `subResourceBaseURL`: when set (e.g. `aether-engine://engine/`),
-    /// `EXT-X-MAP` and segment URIs are emitted as absolute URLs under
-    /// that base. AVPlayer routes them through the
-    /// AVAssetResourceLoaderDelegate instead of resolving as relative
-    /// (HTTP) URLs against the playlist URL. Bypasses CFNetwork for
-    /// the heavy segment payloads (the long-form memory leak source).
+    /// `subResourceBaseURL`: when set, `EXT-X-MAP` and segment URIs are
+    /// emitted as absolute URLs under that base instead of as relative
+    /// paths. Default (nil) emits relative URIs that AVPlayer resolves
+    /// against the playlist URL.
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
                                          subResourceBaseURL: URL? = nil) -> String {
         guard let codecs = provider.masterCodecs else {

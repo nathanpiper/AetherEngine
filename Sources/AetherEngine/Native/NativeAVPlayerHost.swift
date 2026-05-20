@@ -101,37 +101,16 @@ final class NativeAVPlayerHost {
     /// `DisplayCriteriaController.apply(...)` must have been invoked
     /// upstream so AVKit can configure the HDR pipeline against the
     /// right target mode before the first segment is fetched.
-    ///
-    /// `resourceLoaderDelegate` is the bypass-CFNetwork path: when
-    /// non-nil, the asset's `resourceLoader` is wired to the delegate
-    /// and AVPlayer never opens an HTTP connection to a localhost
-    /// server. Required for the custom `aether-engine://` URL scheme.
-    /// When nil, the URL is expected to be an `http://127.0.0.1:PORT`
-    /// served by `HLSLocalServer` (legacy / aetherctl path).
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true,
-              resourceLoaderDelegate: AVAssetResourceLoaderDelegate? = nil) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true) {
         unloadCurrentItem()
 
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
 
-        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil") resourceLoader=\(resourceLoaderDelegate != nil)", category: .engine)
+        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil")", category: .engine)
 
         let asset = AVURLAsset(url: url)
-        if let delegate = resourceLoaderDelegate {
-            // Set on the dedicated delegate queue exposed by our
-            // EngineResourceLoaderDelegate; AVFoundation calls back
-            // synchronously per-request on that queue, so it must NOT
-            // be the main queue (would block UI on every segment).
-            let delegateQueue: DispatchQueue
-            if let engineDelegate = delegate as? EngineResourceLoaderDelegate {
-                delegateQueue = engineDelegate.queue
-            } else {
-                delegateQueue = DispatchQueue.global(qos: .userInitiated)
-            }
-            asset.resourceLoader.setDelegate(delegate, queue: delegateQueue)
-        }
         let item = AVPlayerItem(asset: asset)
         // Match the audio engine's HLSAudioEngine config so any
         // "video-pattern is wrong" hypothesis can be ruled out as we

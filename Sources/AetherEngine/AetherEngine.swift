@@ -678,22 +678,7 @@ public final class AetherEngine: ObservableObject {
             }
         }
         // AVPlayer HLS playback over the loopback HTTP server.
-        //
-        // (Tried two AVAssetResourceLoaderDelegate variants on
-        // 2026-05-20 to bypass CFNetwork — a pure custom-scheme asset
-        // URL and a hybrid HTTP-playlist + custom-scheme-sub-resources
-        // path. Both failed with CoreMedia -12881
-        // (FigHTTPStreamReader parse error) AFTER the delegate
-        // delivered byte-correct init.mp4 and seg0 to AVPlayer. The
-        // bytes flow is verifiably right; AVPlayer's HLS engine
-        // appears to reject delegate-served segment data regardless
-        // of how the playlist arrives. Apple's documented uses of
-        // AVAssetResourceLoaderDelegate are FairPlay HLS keys,
-        // custom-encrypted assets, and on-disk caching — not plain
-        // HLS sub-resource delivery. Reverted to HTTP-only for the
-        // playback path while we evaluate alternatives.)
         let playbackURL = try session.start()
-        let resourceLoaderDelegate: AVAssetResourceLoaderDelegate? = nil
         self.nativeVideoSession = session
 
         let host = NativeAVPlayerHost()
@@ -758,8 +743,7 @@ public final class AetherEngine: ObservableObject {
         let perFrameHDR = session.servingMasterPlaylist
         host.load(url: playbackURL,
                   startPosition: startPosition,
-                  perFrameHDR: perFrameHDR,
-                  resourceLoaderDelegate: resourceLoaderDelegate)
+                  perFrameHDR: perFrameHDR)
     }
 
     /// Open a `SoftwarePlaybackHost` against the source and wire its
@@ -1554,7 +1538,6 @@ public final class AetherEngine: ObservableObject {
                 let srvSfMB = (stats?.serverSendfileBytesSent ?? 0) / 1024 / 1024
                 let pktAlive = stats?.packetsAlive ?? 0
                 let pktTotal = stats?.packetsTotalAllocs ?? 0
-                let rlBytesMB = (stats?.resourceLoaderBytesServed ?? 0) / 1024 / 1024
 
                 // VM breakdown so the leak source is visible at probe
                 // time: internal (Swift / libavformat heap) vs external
@@ -1591,7 +1574,6 @@ public final class AetherEngine: ObservableObject {
                     + "muxBytesMB=\(muxBytesMB) muxCuts=\(muxCuts) "
                     + "srvConns=\(srvConns) srvBytesMB=\(srvBytesMB) srvSfMB=\(srvSfMB) "
                     + "pktAlive=\(pktAlive) pktTotal=\(pktTotal) "
-                    + "rlBytesMB=\(rlBytesMB) "
                     + "subCues=\(cueCount) "
                     + "audioTracks=\(self.audioTracks.count) "
                     + "subTracks=\(self.subtitleTracks.count) "
