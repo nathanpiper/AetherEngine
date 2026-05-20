@@ -1,5 +1,5 @@
 {
-  "originHash" : "d7bbde1f5d8c8b86938fa93c5cd598ba250f93f5f53d5e4531eada69ccd04f74",
+  "originHash" : "e3c177f663a9205019f1edbd3da1ee79ca71100eb301cf60fbb6d982c591d712",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -8,6 +8,15 @@
       "state" : {
         "branch" : "main",
         "revision" : "75600a51a02d122a89aea612809dcbdadb6d16cf"
+      }
+    },
+    {
+      "identity" : "gcdwebserver",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/yene/GCDWebServer",
+      "state" : {
+        "revision" : "c2f837b30038ef716b77225f40cc8d104b6ff645",
+        "version" : "3.5.7"
       }
     }
   ],

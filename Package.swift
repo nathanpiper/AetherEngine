@@ -26,12 +26,24 @@ let package = Package(
         // Resolved over Git rather than a local path so consumers (and
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
         .package(url: "https://github.com/superuser404notfound/FFmpegBuild", branch: "main"),
+        // GCDWebServer for the HLS-fMP4 loopback HTTP server. Our
+        // handrolled BSD-socket impl triggered CFNetwork's loopback
+        // I/O buffer pool to grow ~545 KB per segment served and never
+        // free, OOM'ing long-form playback at ~15 min on Apple TV
+        // (Instruments 2026-05-20: `VM: libnetwork` 66 MiB persistent /
+        // 100% retention). DrHurt's reference Mac server that did NOT
+        // leak is GCDWebServer-based, so swapping in the same library
+        // on-device should produce the same no-leak behaviour.
+        // yene's fork is the SPM-packaged variant of swisspol's
+        // original library; tvOS 14+ supported, PrivacyInfo bundled.
+        .package(url: "https://github.com/yene/GCDWebServer", from: "3.5.4"),
     ],
     targets: [
         .target(
             name: "AetherEngine",
             dependencies: [
                 .product(name: "FFmpegBuild", package: "FFmpegBuild"),
+                .product(name: "GCDWebServer", package: "GCDWebServer"),
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),

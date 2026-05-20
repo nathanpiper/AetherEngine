@@ -209,7 +209,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var demuxer: Demuxer?
     private var cache: SegmentCache?
     private var producer: HLSSegmentProducer?
-    private var server: HLSLocalServer?
+    private var server: HLSGCDServer?
     private var provider: VideoSegmentProvider?
 
     /// Resource loader delegate created lazily on first
@@ -882,12 +882,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "duration=\(String(format: "%.1f", durationSeconds))s"
         )
 
-        // Reverted to all-HTTP playlist (relative URIs) after the
-        // delegate-served-sub-resources hybrid failed with CoreMedia
-        // -12881 (AVPlayer rejects delegate-served HLS segment bytes
-        // regardless of how the playlist arrives). See loadNative for
-        // the full history.
-        let srv = HLSLocalServer(provider: prov)
+        // GCDWebServer-backed loopback HTTP server. Replaces the
+        // handrolled BSD-socket HLSLocalServer that triggered AVPlayer's
+        // CFNetwork loopback pool to leak ~545 KB per segment served
+        // (Instruments 2026-05-20, `VM: libnetwork` 66 MiB persistent /
+        // 100% retention). DrHurt's leak-free Mac reference server is
+        // also GCDWebServer-based; same library on-device should match
+        // that no-leak behaviour by producing the same response shape
+        // / framing / dispatch pattern that CFNetwork is happy with.
+        let srv = HLSGCDServer(provider: prov)
         try srv.start()
         self.server = srv
 
