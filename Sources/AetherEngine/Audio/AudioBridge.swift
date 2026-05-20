@@ -305,6 +305,67 @@ final class AudioBridge: @unchecked Sendable {
         return Int(av_audio_fifo_size(f))
     }
 
+    /// Snapshot of bytes the bridge has live in its growable buffers.
+    /// Used by the engine memory probe to detect whether the bridge is
+    /// the source of linear memory growth. Both fields are growable on
+    /// the FFmpeg side (FIFO reallocs upward, swr's internal delay
+    /// buffer reallocates when input rate / layout shifts), so a
+    /// monotonically rising value across probe samples points the
+    /// finger here vs. the segment muxer or HLS server.
+    ///
+    /// Costs: two C calls, no allocations.
+    struct LiveBytes {
+        /// Samples currently in the FIFO (per channel).
+        let fifoSamples: Int
+        /// Bytes the FIFO is holding in interleaved PCM:
+        /// `samples * channels * bytesPerSample`.
+        let fifoBytes: Int
+        /// Samples the resampler is buffering internally, measured in
+        /// encoder sample-rate units.
+        let swrDelaySamples: Int
+        /// Approximate bytes held in the swr delay buffer
+        /// (`swrDelaySamples * channels * bytesPerSample`). The
+        /// resampler may use a different internal format, but for a
+        /// growth trend this is a fine proxy.
+        let swrDelayBytes: Int
+
+        var totalBytes: Int { fifoBytes + swrDelayBytes }
+    }
+
+    var liveBytes: LiveBytes {
+        let fifoSamples: Int
+        if let f = fifo {
+            fifoSamples = Int(av_audio_fifo_size(f))
+        } else {
+            fifoSamples = 0
+        }
+
+        let channels: Int
+        let bytesPerSample: Int = Int(pcmBytesPerSample)
+        if let enc = encoderCtx {
+            channels = Int(enc.pointee.ch_layout.nb_channels)
+        } else {
+            channels = 0
+        }
+
+        let fifoBytes = fifoSamples * channels * bytesPerSample
+
+        let swrDelaySamples: Int
+        if let swr = swrCtx, let enc = encoderCtx {
+            swrDelaySamples = Int(swr_get_delay(swr, Int64(enc.pointee.sample_rate)))
+        } else {
+            swrDelaySamples = 0
+        }
+        let swrDelayBytes = swrDelaySamples * channels * bytesPerSample
+
+        return LiveBytes(
+            fifoSamples: fifoSamples,
+            fifoBytes: fifoBytes,
+            swrDelaySamples: swrDelaySamples,
+            swrDelayBytes: swrDelayBytes
+        )
+    }
+
     /// Mark a fragment boundary. Drains the FIFO (drops the partial
     /// frame's worth of samples that was buffered for the next
     /// encoder packet, max ~96 ms at 48 kHz), and rebases the

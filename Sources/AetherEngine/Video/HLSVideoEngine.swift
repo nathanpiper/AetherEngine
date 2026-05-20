@@ -971,18 +971,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
         public let producerPacketsWritten: Int
         public let avioBytesFetched: Int64
         public let audioFifoSamples: Int
+        /// Bytes held in AudioBridge's growable PCM buffers (FIFO +
+        /// swr delay). Zero if the bridge isn't active (stream-copy
+        /// audio path or video-only). Linear growth across probe
+        /// samples implicates the bridge as a leak source.
+        public let audioBridgeFifoBytes: Int
+        public let audioBridgeSwrBytes: Int
+        public var audioBridgeTotalBytes: Int { audioBridgeFifoBytes + audioBridgeSwrBytes }
     }
 
     /// Read the current pipeline counters. Returns zeros for any
     /// sub-system that hasn't been constructed yet (pre-start or
     /// post-stop).
     public func diagnosticStats() -> DiagnosticStats {
-        DiagnosticStats(
+        let abLive = audioBridge?.liveBytes
+        return DiagnosticStats(
             segmentCacheCount: cache?.count ?? 0,
             segmentCacheBytes: cache?.totalBytes ?? 0,
             producerPacketsWritten: producer?.packetsWrittenCount ?? 0,
             avioBytesFetched: demuxer?.avioBytesFetched ?? 0,
-            audioFifoSamples: audioBridge?.fifoSampleCount ?? 0
+            audioFifoSamples: audioBridge?.fifoSampleCount ?? 0,
+            audioBridgeFifoBytes: abLive?.fifoBytes ?? 0,
+            audioBridgeSwrBytes: abLive?.swrDelayBytes ?? 0
         )
     }
 

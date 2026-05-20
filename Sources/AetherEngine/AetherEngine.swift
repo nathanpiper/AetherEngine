@@ -1525,6 +1525,9 @@ public final class AetherEngine: ObservableObject {
                 let cacheCount = stats?.segmentCacheCount ?? 0
                 let packetsWritten = stats?.producerPacketsWritten ?? 0
                 let audioFifo = stats?.audioFifoSamples ?? 0
+                let abFifoKB = (stats?.audioBridgeFifoBytes ?? 0) / 1024
+                let abSwrKB = (stats?.audioBridgeSwrBytes ?? 0) / 1024
+                let abTotKB = (stats?.audioBridgeTotalBytes ?? 0) / 1024
 
                 // VM breakdown so the leak source is visible at probe
                 // time: internal (Swift / libavformat heap) vs external
@@ -1557,6 +1560,7 @@ public final class AetherEngine: ObservableObject {
                     + "cacheCount=\(cacheCount) cacheMB=\(cacheMB) "
                     + "packetsWritten=\(packetsWritten) "
                     + "audioFifo=\(audioFifo) "
+                    + "abFifoKB=\(abFifoKB) abSwrKB=\(abSwrKB) abTotKB=\(abTotKB) "
                     + "subCues=\(cueCount) "
                     + "audioTracks=\(self.audioTracks.count) "
                     + "subTracks=\(self.subtitleTracks.count) "
