@@ -232,27 +232,21 @@ final class AudioBridge: @unchecked Sendable {
         // 2. Bridge encoder. Selected by mode:
         //   - .surroundCompat → AV_CODEC_ID_EAC3, 128 kbps per channel, max 6 ch
         //   - .lossless       → AV_CODEC_ID_FLAC, VBR, max 8 ch
+        //
+        // The actual bit_rate is set further below after the channel
+        // count resolves (EAC3 scales 128 kbps × nChannels — DrHurt's
+        // pointer on AetherEngine#4: 256 kbps stereo, 768 kbps 5.1,
+        // scales naturally if the channel cap ever gets bumped per
+        // Nomis101's PR 21668). FLAC stays at 0 = unlimited VBR.
         let encoderCodecID: AVCodecID
         let maxEncodedChannels: Int32
-        let encoderBitRate: Int64
         switch mode {
         case .surroundCompat:
             encoderCodecID = AV_CODEC_ID_EAC3
             maxEncodedChannels = 6
-            // Bitrate is computed dynamically per output channel count
-            // below (after the channel-cap resolves). 128 kbps per
-            // channel is the EAC3 "transparent" reference profile per
-            // DrHurt's pointer on AetherEngine#4: 256 kbps stereo,
-            // 768 kbps 5.1, scales naturally if the channel cap ever
-            // gets bumped (Nomis101's PR 21668 dependent-substream
-            // patch enables 7.1 in EAC3 at 1024 kbps). Saves ~60% of
-            // the bandwidth that a flat 640 kbps cost on stereo /
-            // mono bridge paths (Opus 2.0, MP3, etc.).
-            encoderBitRate = 0  // placeholder, overwritten below
         case .lossless:
             encoderCodecID = AV_CODEC_ID_FLAC
             maxEncodedChannels = 8
-            encoderBitRate = 0
         }
         guard let encCodec = avcodec_find_encoder(encoderCodecID) else {
             cleanup()
