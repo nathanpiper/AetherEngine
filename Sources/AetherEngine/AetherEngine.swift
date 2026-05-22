@@ -325,6 +325,21 @@ public final class AetherEngine: ObservableObject {
     /// session gets a fresh budget.
     private var subtitleCueDiagnosticCount: Int = 0
 
+    /// How far behind `currentTime` to retain old subtitle cues
+    /// before pruning them out of `subtitleCues`. Bounds the
+    /// session-time memory footprint of bitmap subtitle tracks
+    /// (PGS / DVB / DVD), where each cue carries a CGImage that
+    /// retains its decoded RGBA pixel buffer for the cue's lifetime.
+    /// A 2-hour Blu-ray remux with PGS English subtitles emits
+    /// ~1500-2000 cues; without pruning those CGImages stack and
+    /// the heap climbs by several hundred MB over the session.
+    /// 300 s covers normal pause durations and the backward-scrub
+    /// reach that doesn't trigger a producer restart; cues evicted
+    /// before that get re-emitted by the producer on restart since
+    /// `EmbeddedSubtitleDecoder.resetState` clears the seen-key
+    /// dedupe set at every restart.
+    private let subtitleCueRetentionSeconds: Double = 300
+
     // MARK: - Init
 
     /// Lifecycle notification observers, stored for cleanup.
@@ -1409,6 +1424,37 @@ public final class AetherEngine: ObservableObject {
             }
             subtitleCues.insert(cue, at: lo)
         }
+
+        // Prune cues that ended more than `subtitleCueRetentionSeconds`
+        // before the current playback time. Bitmap cues (PGS / DVB /
+        // DVD) each carry a CGImage with retained RGBA pixel data; on
+        // long sessions with PGS subtitles the array grows by 1-2
+        // cues / second and the heap climbs proportionally. The
+        // retention window covers typical pause durations and the
+        // backward-scrub reach that doesn't trigger a producer
+        // restart; anything older that the user revisits via a far
+        // scrub gets re-emitted by the producer pump on restart (the
+        // EmbeddedSubtitleDecoder clears its dedupe set on every
+        // resetState).
+        pruneOldSubtitleCues()
+    }
+
+    /// Remove subtitle cues whose `endTime` has fallen further behind
+    /// the current source-PTS position than the retention window.
+    /// Called from `applySubtitleEvent` so the prune happens at the
+    /// cue-emit cadence (~1-2 / second on a typical PGS track) rather
+    /// than on a separate timer. Compares against `sourceTime` rather
+    /// than `currentTime` because cue start / end timestamps are in
+    /// absolute source PTS seconds (see EmbeddedSubtitleDecoder.decode
+    /// docstring); `currentTime` is `sourceTime - playlistShiftSeconds`
+    /// and the shift can be non-zero per producer session, so using
+    /// the AVPlayer clock here would prune cues out of sync with what
+    /// the host is currently displaying.
+    private func pruneOldSubtitleCues() {
+        guard !subtitleCues.isEmpty else { return }
+        let cutoff = sourceTime - subtitleCueRetentionSeconds
+        guard cutoff > 0 else { return }
+        subtitleCues.removeAll { $0.endTime < cutoff }
     }
 
     /// Decode a sidecar subtitle file (`.srt` / `.ass` / `.vtt` /
