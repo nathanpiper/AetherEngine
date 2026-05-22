@@ -74,40 +74,58 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    /// Settled chunk size: 8 MB.
+    /// Settled chunk size: 64 MB.
     ///
-    /// Re-tuned 2026-05-22 from the historic 64 MB. The original 64 MB
-    /// was a leak-mitigation co-fix during the long-form leak chase:
-    ///   8 MB chunks  → 3.20 MB/s leak (URLSession-call-count dominated)
-    ///   64 MB chunks → 0.64 MB/s leak (5x reduction at the time)
-    ///   256 MB chunks → 4.85 MB/s leak + memory warnings
+    /// History of this knob:
+    ///   - Long-form leak investigation A/B (with the periodic
+    ///     demuxer recycle still active):
+    ///       8 MB chunks  → 3.20 MB/s leak
+    ///       64 MB chunks → 0.64 MB/s leak
+    ///       256 MB chunks → 4.85 MB/s leak + memory warnings
+    ///   - 1ee963d removed the recycle and the recycle race that
+    ///     drove the bulk of the per-chunk retention. Bounded
+    ///     mallocMB (211-291 MB oscillation through 11-min runs)
+    ///     was field-measured at 64 MB chunks post-recycle-removal.
+    ///   - e327e5e (2026-05-22) drop to 8 MB on the assumption that
+    ///     "chunk size doesn't affect leak control after the
+    ///     recycle is gone". That assumption was wrong: at 8 MB +
+    ///     ~6 ops/sec at 4K HEVC bitrates, the per-request URLSession
+    ///     `finishTasksAndInvalidate` (async by design) doesn't
+    ///     complete between requests. URLSession instances and
+    ///     their internal pools accumulate, and `mallocMB` grows
+    ///     linearly at the source bitrate (~6 MB/s on a 50 Mbps
+    ///     stream). Reverted to 64 MB after a 5-min Harry Potter
+    ///     run hit 1.9 GB / 1.8 GB jetsam range.
     ///
-    /// But that A/B was run while the (now-removed) periodic demuxer
-    /// recycle was active. The actual leak source was the recycle's
-    /// swap leaking the previous AVIOReader's buffers via a Swift
-    /// refcount path (closed in 1ee963d); chunk size was a side-
-    /// mitigation that reduced the prefetch-race window. Once the
-    /// recycle was removed the leak rate is bounded regardless of
-    /// chunk size by the per-request URLSession + force-copy fix.
+    /// Why 64 MB works where 8 MB doesn't:
+    ///   - URLSession ops drop from ~6/sec to ~0.8/sec
+    ///   - finishTasksAndInvalidate has time to complete between
+    ///     fetches, so the pool of pending sessions stays at ~1-2
+    ///     instead of climbing to dozens
+    ///   - Per-chunk dispatch_data still goes through force-copy
+    ///     (heap-independent Data), so the per-fetch retention is
+    ///     bounded; the multiplier was the pool accumulation, not
+    ///     individual fetches leaking more
     ///
-    /// Trade-off at 8 MB versus 64 MB:
-    ///   - Cold-start: 4K HEVC at 80 Mbps takes ~0.8 s to fetch the
-    ///     first chunk versus ~6.4 s at 64 MB. AVPlayer ready ~6 s
-    ///     sooner from a cold load.
-    ///   - Steady-state: 1.25 URLSession ops/sec at 80 Mbps versus
-    ///     0.16 ops/sec at 64 MB. Modern URLSession handles 100+
-    ///     ops/sec comfortably; per-fetch latency is hidden by the
-    ///     prefetch closure that runs the next chunk in parallel.
-    ///   - Per-request URLSession TCP/TLS handshake (~50-100 ms on
-    ///     remote CDN, near-zero on LAN): ~12% of throughput at the
-    ///     worst case (80 Mbps remote). Acceptable; bandwidth-bound
-    ///     setups are bandwidth-bound regardless of chunk size.
+    /// Cost: cold-start fetches one 64 MB chunk before AVPlayer can
+    /// open the asset. At 50 Mbps source bitrate ≈ ~10 s wait.
+    /// Partially recovered by 6783036 (probe Demuxer reuse, saves
+    /// 1-3 s by skipping the second avformat_find_stream_info), so
+    /// effective cold-start is ~6-8 s versus the pre-fixes ~10 s+.
     ///
-    /// Other defensive fixes from the leak investigation (close-
-    /// cleanup, race-guard in the prefetch closure) stay in place —
-    /// cheap to retain, robust against any future teardown-with-
-    /// prefetch-in-flight code path.
-    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
+    /// Future optimisation paths (not implemented):
+    ///   - Asymmetric: small first chunk (4 MB ≈ 0.6 s wait) for
+    ///     fast startup, large subsequent chunks (64 MB) for low
+    ///     ops/sec. Requires tracking "is this the first fetch" in
+    ///     the reader.
+    ///   - Single long-lived URLSession with per-task delegate
+    ///     instead of per-request session. Eliminates the
+    ///     invalidation backlog entirely. Risk: returns to the
+    ///     historic dispatch_data task-pool retention pattern;
+    ///     would need re-validating that force-copy makes the pool
+    ///     drop bytes promptly enough.
+    ///   - Bounded pool of N reusable URLSessions, round-robin.
+    private static let chunkSize = 64 * 1024 * 1024  // 64 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
@@ -682,9 +700,9 @@ final class AVIOReader: @unchecked Sendable {
         // is exactly that pattern: libmalloc tracks each pool slot, the
         // contents change but the slot count stays small.
         //
-        // At the current 8 MB chunkSize, the per-chunk overhead is
-        // one 8 MB memcpy per fetch — negligible at 4K HEVC bitrates
-        // (~1-3 chunks/s = 8-24 MB/s copy bandwidth, far under any
+        // At the 64 MB chunkSize, the per-chunk overhead is one
+        // 64 MB memcpy per fetch — negligible at 4K HEVC bitrates
+        // (~0.8 chunks/s = 50 MB/s copy bandwidth, far under any
         // L1/L2 ceiling).
         let session = URLSession(configuration: Self.makeSessionConfig())
         defer { session.finishTasksAndInvalidate() }
