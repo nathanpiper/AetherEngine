@@ -775,33 +775,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
             let codecID = audioStream.pointee.codecpar.pointee.codec_id
             let compat = AudioCodecCompat.from(codecID)
-            // EAC3 stream-copy from MKV needs the dec3 box's pre-parsed
-            // bitstream info, which lives in codecpar.extradata. When the
-            // source matroska CodecPrivate omits it (Jellyfin direct-play
-            // of typical Atmos rips), the mov muxer's avformat_write_header
-            // returns -22 with "Cannot write moov atom before EAC3
-            // packets parsed". That failure happens lazily on the first
-            // muxer alloc inside the producer's pump — after the cascade
-            // below has already returned — so the bridge fallback there
-            // never gets a chance to run. Pre-flight by detecting the
-            // exact codecpar shape that would fail and routing to the
-            // bridge up-front. Atmos object metadata is lost on this
-            // path (bed channels stay lossless via FLAC). dec3
-            // reconstruction from the first packet would restore Atmos
-            // here, deferred until someone surfaces the regression on a
-            // source we care about for spatial mix.
-            let needsExtradataReconstruction = codecID == AV_CODEC_ID_EAC3
-                && audioStream.pointee.codecpar.pointee.extradata_size == 0
             if compat.requiresBridge {
                 bridgePreferred = true
                 EngineLog.emit(
                     "[HLSVideoEngine] audio: codec=\(compat) (bridge required) — decoding + FLAC re-encode",
-                    category: .session
-                )
-            } else if needsExtradataReconstruction {
-                bridgePreferred = true
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec=\(compat) without dec3 extradata (MKV CodecPrivate incomplete) — routing to FLAC bridge, Atmos object metadata will be lost",
                     category: .session
                 )
             } else if compat != .unsupported {
