@@ -132,6 +132,18 @@ final class Demuxer: @unchecked Sendable {
     /// 4K HDR HEVC RSS growth roughly in half on Sodalite (3.24
     /// MB/sec → ~1.7 MB/sec).
     ///
+    /// `+igndts` (PROBE): tells libavformat to ignore container dts
+    /// entirely and infer it from pts. Combined with +genpts this
+    /// should mean dts arrives at the producer already monotonic and
+    /// non-NOPTS, and the producer's NOPTS repair + monotonic
+    /// enforcement (HLSSegmentProducer lines ~756 + ~797) become
+    /// dead code. If field testing confirms the "video dts
+    /// non-monotonic at source" log line stops appearing across
+    /// HEVC open-GOP sources, the producer-side repair stack can be
+    /// simplified. If it re-introduces stuttering or muxer rejects,
+    /// revert this addition (keep +genpts alone) and document the
+    /// failure mode.
+    ///
     /// Tried + reverted: `+sortdts` (would re-order output packets
     /// by dts) and `+discardcorrupt` (drops packets the demuxer
     /// flags as corrupted). Empirical RSS growth got worse with both
@@ -142,7 +154,7 @@ final class Demuxer: @unchecked Sendable {
     /// leading B-frames, so the "video dts non-monotonic at source"
     /// log line still fires regardless.
     private static func applyDemuxerOptions(_ opts: inout OpaquePointer?) {
-        av_dict_set(&opts, "fflags", "+genpts", 0)
+        av_dict_set(&opts, "fflags", "+genpts+igndts", 0)
     }
 
     /// Common stream probing after open.
