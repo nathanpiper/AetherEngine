@@ -587,10 +587,22 @@ final class AudioBridge: @unchecked Sendable {
         return results
     }
 
-    /// Pull S16 samples out of `sf` (decoded source frame), resample
-    /// to encoder format, and push into the FIFO. `swr_convert` can
+    /// Pull samples out of `sf` (decoded source frame), resample to
+    /// encoder format, and push into the FIFO. `swr_convert` can
     /// produce more or fewer samples than the input frame contained,
     /// the FIFO smooths that out.
+    ///
+    /// Buffer layout depends on `pcmSampleFmt`:
+    ///   - **Interleaved** (S16 / S32, the FLAC mode): one contiguous
+    ///     buffer with all channels interleaved sample-by-sample.
+    ///     swr_convert and av_audio_fifo_write both take a single
+    ///     pointer in `out[0]`.
+    ///   - **Planar** (FLTP, the EAC3 mode): one buffer per channel.
+    ///     swr_convert needs `out` to be an array of N pointers, one
+    ///     per channel. Same for av_audio_fifo_write. Passing a single
+    ///     pointer (the interleaved layout) here would have the encoder
+    ///     reading garbage from the N-1 unallocated channel slots,
+    ///     surfaced previously as EXC_BAD_ACCESS inside swr_convert.
     private func resampleAndPushIntoFIFO(
         srcFrame sf: UnsafeMutablePointer<AVFrame>,
         enc: UnsafeMutablePointer<AVCodecContext>,
@@ -601,21 +613,31 @@ final class AudioBridge: @unchecked Sendable {
         guard outNbSamples > 0 else { return }
 
         let nChannels = enc.pointee.ch_layout.nb_channels
-        let bufferBytes = Int(outNbSamples * nChannels * pcmBytesPerSample)
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferBytes)
-        defer { buffer.deallocate() }
+        let isPlanar = av_sample_fmt_is_planar(pcmSampleFmt) != 0
+        let bufferCount = isPlanar ? Int(nChannels) : 1
+        let bytesPerBuffer = isPlanar
+            ? Int(outNbSamples) * Int(pcmBytesPerSample)
+            : Int(outNbSamples) * Int(nChannels) * Int(pcmBytesPerSample)
 
-        // Interleaved (non-planar) destination: swr_convert wants
-        // `uint8_t **out` where out[0] points at the interleaved
-        // sample buffer.
-        var outPtr: UnsafeMutablePointer<UInt8>? = buffer
-        let producedSamples = withUnsafeMutablePointer(to: &outPtr) { outBufPtr in
+        // Allocate N (planar) or 1 (interleaved) buffer(s).
+        var buffers: [UnsafeMutablePointer<UInt8>] = []
+        buffers.reserveCapacity(bufferCount)
+        for _ in 0..<bufferCount {
+            buffers.append(UnsafeMutablePointer<UInt8>.allocate(capacity: bytesPerBuffer))
+        }
+        defer { for b in buffers { b.deallocate() } }
+
+        // Build an array of pointers for swr_convert + FIFO write. For
+        // interleaved this is a single-element array; for planar it's
+        // one entry per channel.
+        var outPtrs: [UnsafeMutablePointer<UInt8>?] = buffers.map { $0 }
+        let producedSamples = outPtrs.withUnsafeMutableBufferPointer { outBuf in
             withUnsafeMutablePointer(to: &sf.pointee.extended_data) { srcPtr in
                 let srcReadOnly = UnsafeRawPointer(srcPtr.pointee)
                     .assumingMemoryBound(to: UnsafePointer<UInt8>?.self)
                 return swr_convert(
                     swr,
-                    outBufPtr,
+                    outBuf.baseAddress,
                     outNbSamples,
                     srcReadOnly,
                     sf.pointee.nb_samples
@@ -624,11 +646,14 @@ final class AudioBridge: @unchecked Sendable {
         }
         guard producedSamples > 0 else { return }
 
-        // Push into FIFO. av_audio_fifo_write takes `void **data`,
-        // for non-planar formats only data[0] is read.
-        var fifoData: UnsafeMutablePointer<UInt8>? = buffer
-        _ = withUnsafeMutablePointer(to: &fifoData) { ptr in
-            ptr.withMemoryRebound(to: UnsafeMutableRawPointer?.self, capacity: 1) { rebound in
+        // av_audio_fifo_write takes `void **data`. The same per-channel
+        // (planar) or single-pointer (interleaved) array works for
+        // both: the FIFO was init'd with the sample format and knows
+        // the layout.
+        _ = outPtrs.withUnsafeMutableBufferPointer { fifoBuf in
+            fifoBuf.baseAddress!.withMemoryRebound(
+                to: UnsafeMutableRawPointer?.self, capacity: bufferCount
+            ) { rebound in
                 av_audio_fifo_write(fifo, rebound, producedSamples)
             }
         }
@@ -670,9 +695,18 @@ final class AudioBridge: @unchecked Sendable {
             let allocRet = av_frame_get_buffer(of, 0)
             if allocRet < 0 { break }
 
-            // FIFO read into of.data[0] (interleaved is non-planar).
+            // FIFO read into the AVFrame's data planes. For interleaved
+            // formats `data[0]` holds the contiguous sample buffer; for
+            // planar formats `data[0..N-1]` hold one buffer per channel
+            // (extended_data[i] for high channel counts beyond 8, but
+            // EAC3 caps us at 6 and FLAC at 8 so data[] is sufficient).
+            // `av_audio_fifo_read` takes `void **data` and respects the
+            // FIFO's sample format (planar vs interleaved) to choose
+            // whether to write to data[0] alone or fan out per channel.
+            let isPlanar = av_sample_fmt_is_planar(pcmSampleFmt) != 0
+            let planes = isPlanar ? Int(nChannels) : 1
             let readSamples = withUnsafeMutablePointer(to: &of.pointee.data) { dataPtr in
-                dataPtr.withMemoryRebound(to: UnsafeMutableRawPointer?.self, capacity: 1) { rebound in
+                dataPtr.withMemoryRebound(to: UnsafeMutableRawPointer?.self, capacity: planes) { rebound in
                     av_audio_fifo_read(fifo, rebound, chunkSize)
                 }
             }
