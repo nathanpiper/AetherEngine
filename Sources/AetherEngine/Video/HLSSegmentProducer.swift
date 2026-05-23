@@ -1055,14 +1055,45 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     if firstActualAudioDts == Int64.min {
                         firstActualAudioDts = packet.pointee.dts
                         audioShiftPts = firstActualAudioDts - desiredFirstAudioTfdtPts
+                        // Gap between video's first kept dts (rescaled
+                        // into the source audio TB) and the audio
+                        // packet we just accepted as the gate opener.
+                        // A non-zero gap means the audio content
+                        // playing alongside seg-N's first video frame
+                        // actually corresponds to a slightly different
+                        // source-time, which surfaces as A/V drift on
+                        // restart sessions (Vincent's scrub-back-to-
+                        // start desync repro). Within ~25 ms is one
+                        // AAC frame and not perceptible; anything
+                        // larger gets a WARNING so it's grep-able in
+                        // a support log.
+                        let gapInAudioTb = restartTargetAudioDts == Int64.min
+                            ? 0
+                            : firstActualAudioDts - restartTargetAudioDts
+                        let audioTb = audioConfig?.sourceTimeBase ?? AVRational(num: 1, den: 1000)
+                        let gapMs = audioTb.den > 0
+                            ? Double(gapInAudioTb) * Double(audioTb.num) * 1000.0 / Double(audioTb.den)
+                            : 0
                         EngineLog.emit(
                             "[HLSSegmentProducer] audio gate open: "
                             + "actual=\(firstActualAudioDts) "
                             + "target=\(restartTargetAudioDts) "
                             + "desired=\(desiredFirstAudioTfdtPts) "
-                            + "shift=\(audioShiftPts)",
+                            + "shift=\(audioShiftPts) "
+                            + "gapMs=\(String(format: "%.1f", gapMs))",
                             category: .session
                         )
+                        if abs(gapMs) > 50 {
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] WARNING: audio gate "
+                                + "opened \(String(format: "%.1f", gapMs)) ms "
+                                + "after video gate (baseIndex=\(baseIndex)). "
+                                + "Audio content for seg-\(baseIndex)'s first "
+                                + "video frame is offset from the video by "
+                                + "this much, expect A/V drift to be audible.",
+                                category: .session
+                            )
+                        }
                     }
                 }
 
