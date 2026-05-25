@@ -167,7 +167,7 @@ final class DisplayCriteriaController {
     ///
     /// Two-stage poll so we don't race the setter's async handshake:
     ///
-    ///   1. Start phase (up to 200ms, 10ms ticks). `displayManager.
+    ///   1. Start phase (up to 1000ms, 10ms ticks). `displayManager.
     ///      preferredDisplayCriteria = criteria` in `apply()` returns
     ///      immediately, but the HDMI handshake initiates asynchronously
     ///      a moment later, which means `isDisplayModeSwitchInProgress`
@@ -180,7 +180,10 @@ final class DisplayCriteriaController {
     ///      "Cannot Open" because the master playlist's `VIDEO-RANGE=PQ`
     ///      hit AVPlayer before the panel transitioned out of SDR.
     ///
-    ///      We give the handshake up to 200ms to start. If
+    ///      When AVKit's auto-criteria path is the sole writer (engine
+    ///      pre-flight suppressed via LoadOptions), the write fires
+    ///      later and more variably than a synchronous engine pre-flight.
+    ///      We give the handshake up to 1000ms to start. If
     ///      `currentEDRHeadroom > 1.001` already, the panel was already
     ///      in HDR mode for the target format and no switch is needed
     ///      (e.g., user replays an HDR title that left the panel in HDR
@@ -197,11 +200,17 @@ final class DisplayCriteriaController {
         let displayManager = window.avDisplayManager
         let screen = window.screen
 
-        // Stage 1: wait for the handshake to start. Cap 200ms so a
-        // panel that genuinely doesn't engage HDR (criteria silently
-        // rejected) doesn't stall the load path.
+        // Stage 1: wait for the handshake to start. Cap 1000ms so
+        // when AVKit's auto-criteria path drives the write (instead
+        // of the engine's pre-flight) we don't bail before AVKit has
+        // had time to parse the manifest + fMP4 sample entry and
+        // produce its own preferredDisplayCriteria write. Auto-path
+        // timing is later and more variable than the engine pre-flight
+        // (which writes synchronously); 1000ms gives AVKit comfortable
+        // headroom while still failing fast on panels that genuinely
+        // don't engage HDR (criteria silently rejected).
         var sawSwitchStart = false
-        for _ in 0..<20 {
+        for _ in 0..<100 {
             if displayManager.isDisplayModeSwitchInProgress {
                 sawSwitchStart = true
                 break
@@ -220,7 +229,7 @@ final class DisplayCriteriaController {
             // unsupported codec) or the setter was a no-op (criteria
             // already matched). Don't block playback further; AVPlayer
             // will either tonemap or fail with a real error.
-            EngineLog.emit("[DisplayCriteria] WARN handshake never started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after 200ms); proceeding", category: .engine)
+            EngineLog.emit("[DisplayCriteria] WARN handshake never started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after 1000ms); proceeding", category: .engine)
             return
         }
 
@@ -228,7 +237,7 @@ final class DisplayCriteriaController {
         for tick in 0..<50 {
             try? await Task.sleep(for: .milliseconds(100))
             if !displayManager.isDisplayModeSwitchInProgress {
-                let totalMs = (tick + 1) * 100 + 200  // include stage 1 budget
+                let totalMs = (tick + 1) * 100 + 1000  // include stage 1 budget
                 if screen.currentEDRHeadroom > 1.001 {
                     EngineLog.emit("[DisplayCriteria] switch settled after ~\(totalMs)ms (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 } else {

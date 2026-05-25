@@ -695,6 +695,19 @@ public final class AetherEngine: ObservableObject {
                 // video-only leaves the field nil.
                 activeAudioDecoder = nativeVideoSession?.audioPipelineDescription
                 presentCurrentLayer()
+                // Gate play() on panel handshake completion. With the
+                // host's `appliesPreferredDisplayCriteriaAutomatically`
+                // = true, AVKit drives the criteria write from the
+                // live AVPlayerItem's formatDescription (which reads
+                // dvcC correctly from the fMP4 sample entry via
+                // private CoreMedia hooks). waitForSwitch's Stage 1
+                // grace gives AVKit time to fire that write; Stage 2
+                // waits for the panel handshake to settle so the
+                // first decoded frame doesn't hit a mid-transition
+                // panel. For P5 specifically (no HDR10 base, requires
+                // immediate DV mode), this is what makes cold-start
+                // playback land.
+                await displayCriteria.waitForSwitch()
                 // Auto-play after load. AVPlayer's
                 // `automaticallyWaitsToMinimizeStalling = true` (default)
                 // handles "play before ready" correctly: it transitions
@@ -1165,6 +1178,11 @@ public final class AetherEngine: ObservableObject {
                 )
                 activeAudioDecoder = nativeVideoSession?.audioPipelineDescription
                 presentCurrentLayer()
+                // Same play-gate as the initial load path: wait for any
+                // pending AVKit auto-criteria handshake before resuming,
+                // so the first decoded frame after the audio-track reload
+                // doesn't hit a mid-transition panel.
+                await displayCriteria.waitForSwitch()
                 nativeHost?.play()
             }
             state = .playing
