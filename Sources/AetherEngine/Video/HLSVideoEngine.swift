@@ -686,45 +686,51 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 primaryCodecs = "dvh1.05.\(dvLevelStr)"
                 supplementalCodecs = nil
             case .profile81:
-                // P8.1 (HDR10-compat base layer). Per Apple's HLS
-                // Authoring Spec post-WWDC22, backward-compatible
-                // DV ships with `hvc1` sample entry + `hvcC` + `dvvC`
-                // boxes, primary CODECS `hvc1.2.4.LXX`, and
+                // P8.1 (HDR10-compat base layer). Two branches based on
+                // display capability:
+                //
+                // DV-capable panel (`effectiveDvMode == true`): emit
+                // Apple's HLS Authoring Spec post-WWDC22 signaling for
+                // backward-compatible DV: `hvc1` sample entry + `hvcC`
+                // + `dvvC` boxes (the mp4 muxer with `strict=-2` writes
+                // dvvC automatically when DV side data is preserved on
+                // the codecpar), primary CODECS `hvc1.2.4.LXX`,
                 // SUPPLEMENTAL-CODECS `dvh1.08.XX/db1p`. The `/db1p`
                 // brand identifier marks the supplemental as DV with
-                // HDR10 base for AVPlayer's profile-matching logic;
-                // without it the variant is treated as plain HDR10
-                // and the DV pipeline never engages on Apple TV.
+                // HDR10 base for AVPlayer's profile-matching; without
+                // it the variant is treated as plain HDR10 and the DV
+                // pipeline never engages. AVKit's auto-criteria parser
+                // reads the dvvC from the live AVPlayerItem.
+                // formatDescription via the private CoreMedia hook.
                 //
-                // The mp4 muxer with `strict=-2` automatically writes
-                // a `dvvC` box alongside `hvcC` when the source's
-                // `AV_PKT_DATA_DOVI_CONF` side data is preserved (we
-                // do NOT call `stripDolbyVisionSideData` here), so
-                // AVKit's auto-criteria parser reads the DV profile
-                // from the live AVPlayerItem.formatDescription via
-                // the private CoreMedia dvvC hook and writes the
-                // right DV criteria the panel honours.
-                //
-                // SUPPLEMENTAL-CODECS is emitted ONLY on DV-capable
-                // panels. Spec says non-DV clients should ignore the
-                // hint, but AVPlayer empirically reads `/db1p` as
-                // "DV available with HDR10 base" and engages the DV
-                // codec selection path even on HDR10-only displays,
-                // which then fails asset open silently when the panel
-                // can't reach DV mode (Vincent test 2026-05-26: HDR10
-                // TV + match dynamic range ON, panel switches to HDR
-                // correctly but picture stays black, no error). On
-                // non-DV panels we revert to the prior working
-                // emission: plain `hvc1.2.4.LXX` master variant,
-                // AVPlayer plays it as HDR10 via the hvcC box; the
-                // dvvC box in the same sample entry is silently
-                // ignored by the HEVC path.
+                // Non-DV panel (HDR10-only): emit plain HEVC HDR10 and
+                // STRIP DV side data so the muxer writes a clean
+                // `hvc1` + `hvcC` sample entry with NO dvvC box. The
+                // SUPPLEMENTAL hint causes AVPlayer to engage the DV
+                // codec path even on HDR10-only displays and fail
+                // silently (regression in 1.4.2, fixed in f7e9f77 by
+                // gating SUPPLEMENTAL on `effectiveDvMode`). But a
+                // dvvC box left in the sample entry trips tvOS 26's
+                // master-level codec filter with -11868 even when
+                // CODECS is plain `hvc1.2.4.LXX` (Vincent test
+                // 2026-05-26: HDR10 TV + match dynamic range ON,
+                // panel switches to HDR correctly but `item.status`
+                // goes `.failed` with `AVFoundationErrorDomain -11868`
+                // / `CoreMediaErrorDomain -17223`, picture stays
+                // black). Stripping DV side data mirrors P7's strategy
+                // (P7 always strips because no Apple TV chip has a P7
+                // decoder); for P8.1 we strip conditionally based on
+                // display capability since DV-capable panels need the
+                // dvvC for the upgrade path.
                 codecTagOverride = "hvc1"
                 videoRange = .pq
                 primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-                supplementalCodecs = effectiveDvMode
-                    ? "dvh1.08.\(dvLevelStr)/db1p"
-                    : nil
+                if effectiveDvMode {
+                    supplementalCodecs = "dvh1.08.\(dvLevelStr)/db1p"
+                } else {
+                    supplementalCodecs = nil
+                    stripDolbyVisionMetadata = true
+                }
             case .profile84:
                 // P8.4 (HLG-compat base layer). Bare `dvh1` empirically
                 // does NOT play on either an HDR-mode or SDR-locked
