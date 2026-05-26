@@ -2282,9 +2282,24 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         //     when AVPlayer rebuffers behind the skip target and the
         //     declareTarget prune evicts a segment AVPlayer will need
         //     later) still trigger a restart after the wait times out.
+        // Stale-leftover guard: the request is well below where the
+        // current producer was launched. `cache.indexRange()` can still
+        // report a lower bound from segments left over by a previous
+        // producer (typical case: cold-start probe wrote seg-0 / seg-1
+        // before the host's resume target triggered a restart at
+        // baseIndex=N), and the range-based branch below would mis-
+        // classify the request as "producer is about to write this;
+        // wait" and stall on a segment the current producer will never
+        // generate. Force a restart at the requested index so the
+        // producer relocates to where AVPlayer is actually fetching.
+        // Tolerance of 2 matches the empty-cache branch's heuristic
+        // for "near the producer's launch point, just wait."
         let range = cache.indexRange()
+        let staleBelowProducer = index < lastRestartIndex - 2
         let needsRestart: Bool
-        if let r = range {
+        if staleBelowProducer {
+            needsRestart = true
+        } else if let r = range {
             if index < r.0 {
                 needsRestart = true
             } else if index > r.1 + Self.forwardWaitWindow {
