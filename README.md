@@ -114,6 +114,49 @@ Install via Swift Package Manager:
 .package(url: "https://github.com/superuser404notfound/AetherEngine", branch: "main")
 ```
 
+## Host setup on tvOS
+
+For HDR / Dolby Vision sources to play reliably on tvOS 26.5+, the
+engine must drive `AVDisplayManager.preferredDisplayCriteria` itself
+(synchronously, before the AVPlayerItem assignment). Apple Tech Talk
+503 has prescribed this ordering since 2017, and tvOS 26.5 now
+enforces it synchronously at HLS variant validation: the validator
+rejects variants whose `VIDEO-RANGE` the panel can't currently host
+with `AVFoundationErrorDomain -11868 / AVErrorNoCompatibleAlternatesForExternalDisplay`,
+before fetching the `EXT-X-MAP` init segment, producing
+`item.status = .failed` with zero `errorLog().events`. SDR variants
+are unaffected since SDR is universally supported.
+
+AVKit-auto criteria (`appliesPreferredDisplayCriteriaAutomatically = true`)
+cannot satisfy this contract for HLS multivariant HDR sources because
+AVKit reads criteria from `AVAsset.preferredDisplayCriteria`, which
+is synthesized from the chosen variant's `CMVideoFormatDescription`,
+which only exists after `init.mp4` is parsed, which only happens
+after the variant passes the validator. Chicken-and-egg.
+
+Engine-driven sole-writer is the working pattern:
+
+```swift
+// In your AVPlayerViewController subclass
+playerVC.appliesPreferredDisplayCriteriaAutomatically = false
+
+// When loading
+try await engine.load(
+    url: url,
+    options: LoadOptions(
+        suppressDisplayCriteria: false,      // default; engine writes criteria
+        matchContentEnabled: matchContent,   // tvOS Match Content master toggle
+        panelIsInHDRMode: panelInHDRMode     // current EDR-headroom > 1.0
+    )
+)
+```
+
+`LoadOptions.suppressDisplayCriteria` defaults to `false` so the
+engine-driven path is the default. The engine's `apply()` runs
+synchronously inside `load(url:)`, then `waitForSwitch` blocks
+until the panel reaches the target mode or 5 s timeout, then
+`replaceCurrentItem` runs against an already-correct panel mode.
+
 ## Playback pipeline
 
 AetherEngine has two playback pipelines, picked once at `load(url:)` based on the source's video codec:
