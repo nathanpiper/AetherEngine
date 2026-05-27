@@ -53,4 +53,6 @@ swift run
 
 A *AetherEngine Demo* window opens. Drag a video file onto it; playback starts. Click or press space to toggle play / pause; escape to stop. A corner badge shows `native` or `sw` so bug reporters can attribute the source to the right backend in repro posts.
 
-No transport bar, no subtitle picker, no settings — by design. The demonstrator's job is to prove playback; anything past that belongs in a real host app like [Sodalite](https://github.com/superuser404notfound/Sodalite). A distributable `.dmg` build is on the roadmap (see [issue #18](https://github.com/superuser404notfound/AetherEngine/issues/18)).
+No transport bar, no subtitle picker, no settings — by design. The demonstrator's job is to prove playback; anything past that belongs in a real host app like [Sodalite](https://github.com/superuser404notfound/Sodalite).
+
+For shipping a notarized `.dmg` end users can download (the long-form goal of [issue #18](https://github.com/superuser404notfound/AetherEngine/issues/18)), see [`DemoPlayerMac/Scripts/build-dmg.sh`](DemoPlayerMac/Scripts/build-dmg.sh) — universal binary, Hardened Runtime, Gatekeeper-accepted. Requires a Developer ID Application certificate; setup steps are in the script's docstring.

@@ -26,9 +26,42 @@ Controls:
 | Escape | Stop and return to the drop zone |
 | Drop a different file | Loads the new file (current one is stopped first by the engine) |
 
-## Distribution build (Phase B, planned)
+## Distribution build (Phase B)
 
-A `Scripts/build-dmg.sh` will be added to produce a notarized `.dmg` so end users can download an `.app` from the GitHub Release assets without compiling. Until then, the source build is the supported path.
+[`Scripts/build-dmg.sh`](Scripts/build-dmg.sh) produces a notarized universal-binary `.dmg` ready to attach to a GitHub Release as a download. End users get a double-clickable `.app` with Gatekeeper acceptance and no "unidentified developer" warning.
+
+One-time setup on the build machine:
+
+1. Confirm the Developer ID Application certificate is installed:
+
+   ```bash
+   security find-identity -v -p codesigning | grep "Developer ID Application"
+   ```
+
+   The line shows `"Developer ID Application: Your Name (TEAMID)"`. That whole quoted string is your `DEVELOPER_ID`.
+
+2. Store notarization credentials in the keychain so the script doesn't have to prompt every run. Generate an app-specific password at https://appleid.apple.com, then:
+
+   ```bash
+   xcrun notarytool store-credentials NOTARY_PROFILE \
+     --apple-id you@example.com \
+     --team-id YOURTEAM \
+     --password xxxx-xxxx-xxxx-xxxx
+   ```
+
+   Pick whatever profile name you want; the script reads it from `$NOTARY_PROFILE`.
+
+Then run the build:
+
+```bash
+DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE="NOTARY_PROFILE" \
+./Scripts/build-dmg.sh
+```
+
+The output lands in `build/AetherEngine-Demo-<version>.dmg`. Six phases run in sequence: universal release build, `.app` wrap with Info.plist + entitlements, code-sign with Hardened Runtime, notarize + staple the `.app`, package into `.dmg`, sign + notarize the `.dmg`. Takes 1–3 minutes mostly waiting on Apple's notary service.
+
+Optional env overrides: `VERSION` (default `2.0.0`), `APP_NAME`, `BUNDLE_ID`. If `NOTARY_PROFILE` is unset the script still builds + signs but skips notarization — useful for local smoke tests; the output won't pass Gatekeeper on other machines.
 
 ## Why a separate `Package.swift`
 
