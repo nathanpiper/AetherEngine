@@ -362,6 +362,35 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 - No Metal shaders. Everything renders through Apple's native display stack.
 - No third-party networking. `URLSession` handles bytes; TLS / HTTP-3 / proxies / MDM rules ride for free.
 
+## Known limitations
+
+Things that work today but have a documented edge case, or are deferred behind an upstream dependency:
+
+- **TrueHD-MAT Atmos object metadata is not preserved.** TrueHD / MLP sources route through the AudioBridge (FFmpeg's EAC3 encoder doesn't produce JOC, which is the Dolby-licensed Atmos-in-EAC3 extension). Bed channels and surround layout survive; object metadata is dropped. EAC3+JOC stream-copy from MKV / MP4 sources is intact.
+- **`.surroundCompat` audio bridge caps 7.1 sources to 5.1.** FFmpeg's EAC3 encoder currently caps at 6 channels. Once [FFmpeg PR 21668](https://github.com/FFmpeg/FFmpeg/pull/21668) lands the cap and the dynamic bitrate auto-scale to 1024 kbps engage without a code change here. Use `.lossless` (FLAC) today if 7.1 matters.
+- **Manual `MPNowPlayingInfoCenter` writes race the HLS-loopback path on tvOS 26.** The combination produces a `libdispatch` race. Only `AVPlayerViewController` with its standard transport bar safely surfaces Now Playing. Hosts that need a custom transport should use `MPNowPlayingSession` against the engine's `currentAVPlayer` publisher instead of `MPNowPlayingInfoCenter.default().nowPlayingInfo`.
+- **HDMI route reports ch=2 → multichannel plays as stereo.** When the sink reports a 2-channel audio route (`AVAudioSession.outputNumberOfChannels == 2`), all non-Atmos multichannel material downmixes to stereo. This is a sink-side issue (some AVRs cache HDMI EDID incorrectly after standby). Power-cycling the sink restores the correct route. Atmos passthrough still works on these routes because EAC3+JOC ships as MAT 2.0 over a 2-channel carrier.
+- **Live MPEG-TS sliding-window segment eviction is not yet implemented.** `LoadOptions.isLive` enables the scaffold (no-op seek, `@Published isLive`), but long-running live sessions on the native AVPlayer path accumulate cached segments. Live VOD playback works; multi-hour IPTV / broadcaster feeds will grow memory until the source ends.
+- **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships HW AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is meaningfully higher than HW HEVC. On iOS 17+ / macOS 14+ AV1 routes through Apple's HW pipeline transparently. Future Apple TV chips with HW AV1 will be picked up automatically by `VTCapabilityProbe`.
+
+## Stability and versioning
+
+AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface — every `public` declaration in `Sources/AetherEngine/` — is the stability contract:
+
+- **Major (`x.0.0`)**: removes or renames public symbols, changes method signatures, changes default behaviour in a way that breaks adopters.
+- **Minor (`1.x.0`)**: adds public API, adds codec / format support, fixes behaviour that adopters could not reasonably have depended on.
+- **Patch (`1.0.x`)**: fixes bugs and reliability issues. No public API changes.
+
+`internal` types and properties are not part of the contract and may change in any release. `@testable import AetherEngine` reaches them for the package's own tests, not for production use.
+
+Pin `from: "1.5.0"` in your `Package.swift` to allow patch + minor updates while excluding breaking changes:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "1.5.0")
+```
+
+Pin to `.upToNextMinor(from: "1.5.0")` for stricter teams that prefer to opt into minor bumps explicitly. See [CHANGELOG.md](CHANGELOG.md) for the per-release index.
+
 ## Requirements
 
 | | Min |
