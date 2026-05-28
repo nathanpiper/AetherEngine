@@ -144,19 +144,32 @@ final class MP4SegmentMuxer {
         let stripDolbyVisionMetadata: Bool
         /// Optional color-signaling override. See `ColorOverride`.
         let colorOverride: ColorOverride?
+        /// Optional replacement for the output stream's
+        /// `codecpar.extradata` after `avcodec_parameters_copy`.
+        /// Used when the source's hvcC carries only the configuration
+        /// header (numOfArrays = 0) and parameter sets are in-band,
+        /// so the engine has rebuilt a proper hvcC with VPS / SPS /
+        /// PPS arrays for AVPlayer to build a CMVideoFormatDescription
+        /// from. The mp4 muxer reads `codecpar.extradata` directly
+        /// into the sample entry's `hvcC` / `avcC` box, so replacing
+        /// the buffer here is enough to land the rebuilt configuration
+        /// record in `init.mp4`.
+        let extradataOverride: [UInt8]?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
             timeBase: AVRational,
             codecTagOverride: String?,
             stripDolbyVisionMetadata: Bool = false,
-            colorOverride: ColorOverride? = nil
+            colorOverride: ColorOverride? = nil,
+            extradataOverride: [UInt8]? = nil
         ) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.codecTagOverride = codecTagOverride
             self.stripDolbyVisionMetadata = stripDolbyVisionMetadata
             self.colorOverride = colorOverride
+            self.extradataOverride = extradataOverride
         }
     }
 
@@ -377,6 +390,9 @@ final class MP4SegmentMuxer {
             videoStream.pointee.codecpar.pointee.color_space = co.space
             videoStream.pointee.codecpar.pointee.color_range = co.range
         }
+        if let extradata = video.extradataOverride {
+            Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
+        }
 
         // Audio stream (optional).
         if let audio = audio {
@@ -520,6 +536,9 @@ final class MP4SegmentMuxer {
             videoStream.pointee.codecpar.pointee.color_trc = co.trc
             videoStream.pointee.codecpar.pointee.color_space = co.space
             videoStream.pointee.codecpar.pointee.color_range = co.range
+        }
+        if let extradata = video.extradataOverride {
+            Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
         }
 
         // Audio stream (optional).
@@ -849,6 +868,30 @@ final class MP4SegmentMuxer {
             &codecpar.pointee.nb_coded_side_data,
             AV_PKT_DATA_DOVI_CONF
         )
+    }
+
+    /// Replace the output stream's `codecpar.extradata` with the
+    /// caller-supplied bytes, using FFmpeg's `av_malloc` and the
+    /// required `AV_INPUT_BUFFER_PADDING_SIZE` trailing pad. Frees
+    /// the buffer that `avcodec_parameters_copy` placed there.
+    private static func replaceExtradata(
+        _ codecpar: UnsafeMutablePointer<AVCodecParameters>,
+        with bytes: [UInt8]
+    ) {
+        if codecpar.pointee.extradata != nil {
+            av_freep(&codecpar.pointee.extradata)
+        }
+        codecpar.pointee.extradata_size = 0
+        let total = bytes.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)
+        guard let buf = av_malloc(total)?.assumingMemoryBound(to: UInt8.self) else { return }
+        bytes.withUnsafeBufferPointer { src in
+            if let base = src.baseAddress {
+                memcpy(buf, base, bytes.count)
+            }
+        }
+        memset(buf + bytes.count, 0, Int(AV_INPUT_BUFFER_PADDING_SIZE))
+        codecpar.pointee.extradata = buf
+        codecpar.pointee.extradata_size = Int32(bytes.count)
     }
 }
 

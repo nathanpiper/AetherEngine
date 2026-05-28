@@ -562,7 +562,30 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // that behavior for DV-routed-as-HDR10 is the right default.
         let hdcpLevel: String? = nil
 
-        // 5. Position the demuxer at the file's first packet so the
+        // 5. Scan for in-band HEVC parameter sets when the source's
+        //    hvcC carries only the configuration header (numOfArrays
+        //    = 0). Some DV Profile 5 MP4 encoders ship parameter sets
+        //    in-band on every IRAP instead of in the configuration
+        //    record (issue #19 Wandering Earth 2 WEB-DL). Without
+        //    VPS / SPS / PPS in the output hvcC, AVPlayer cannot
+        //    build a CMVideoFormatDescription for the dvh1 sample
+        //    entry and the item fails with CoreMediaErrorDomain -4.
+        //    Reads consume packets; the seek-to-0 below resets the
+        //    cursor for the producer pump.
+        let hevcExtradataOverride = rebuildHEVCExtradataWithInBandParameterSets(
+            demuxer: dem,
+            videoStreamIndex: videoIndex,
+            codecpar: codecpar
+        )
+        if let rebuilt = hevcExtradataOverride {
+            EngineLog.emit(
+                "[HLSVideoEngine] rebuilt hvcC with in-band parameter sets: "
+                + "\(codecpar.pointee.extradata_size) B → \(rebuilt.count) B",
+                category: .session
+            )
+        }
+
+        // 6. Position the demuxer at the file's first packet so the
         //    producer's pump starts from byte zero. The cue prewarm
         //    above moved the cursor mid-file; libavformat's index is
         //    populated now, this seek-to-0 is cheap.
@@ -605,7 +628,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             timeBase: videoTimeBase,
             codecTagOverride: codecTagOverride,
             stripDolbyVisionMetadata: stripDolbyVisionMetadata,
-            colorOverride: p5ColorOverride
+            colorOverride: p5ColorOverride,
+            extradataOverride: hevcExtradataOverride
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
@@ -1351,7 +1375,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 timeBase: vcfg.timeBase,
                 codecTagOverride: vcfg.codecTagOverride,
                 stripDolbyVisionMetadata: vcfg.stripDolbyVisionMetadata,
-                colorOverride: vcfg.colorOverride
+                colorOverride: vcfg.colorOverride,
+                extradataOverride: vcfg.extradataOverride
             )
             let probeAudio = MP4SegmentMuxer.AudioConfig(
                 codecpar: cfg.codecpar,
@@ -1679,6 +1704,122 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func isHDRTransfer(_ codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
         let trc = codecpar.pointee.color_trc
         return trc == AVCOL_TRC_SMPTE2084 || trc == AVCOL_TRC_ARIB_STD_B67
+    }
+
+    /// When the source HEVC's `hvcC` (in `codecpar.extradata`) carries
+    /// the configuration header but no VPS / SPS / PPS arrays, scan
+    /// the first packets for in-band parameter sets and return a
+    /// rebuilt `hvcC` byte sequence with those arrays populated.
+    /// Returns nil when the source already has parameter set arrays,
+    /// when the source uses a non-4-byte NALU length size, or when
+    /// the scan exhausts the budget without finding all three NAL
+    /// types.
+    ///
+    /// Some DV Profile 5 MP4 encoders write only the 23-byte hvcC
+    /// header (`numOfArrays = 0`) and leave VPS / SPS / PPS in-band
+    /// in every IRAP packet (issue #19 Wandering Earth 2 WEB-DL).
+    /// FFmpeg's mp4 muxer stream-copies that hvcC through, so the
+    /// output fMP4 has a `dvh1` sample entry that AVPlayer cannot
+    /// build a `CMVideoFormatDescription` from. AVPlayer's symptom is
+    /// `item.tracks count=2` but `fourCC=<no fdesc>` and
+    /// `item.status .failed` with `CoreMediaErrorDomain -4`. The
+    /// matroska demuxer doesn't hit this because matroska parameter
+    /// sets are in the `CodecPrivate` block which FFmpeg lifts into
+    /// `codecpar.extradata` as a complete annex-B sequence that the
+    /// mp4 muxer's `ff_isom_write_hvcc` then rebuilds properly.
+    ///
+    /// Caller is expected to seek the demuxer back to a known
+    /// position after this returns, since extracting consumes
+    /// packets.
+    private func rebuildHEVCExtradataWithInBandParameterSets(
+        demuxer: Demuxer,
+        videoStreamIndex: Int32,
+        codecpar: UnsafePointer<AVCodecParameters>
+    ) -> [UInt8]? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
+        let extradataSize = Int(codecpar.pointee.extradata_size)
+        guard extradataSize >= 23, let extradata = codecpar.pointee.extradata else { return nil }
+        // hvcC byte 22 is numOfArrays. Non-zero means parameter sets
+        // already in the configuration record; nothing to do.
+        guard extradata[22] == 0 else { return nil }
+        // hvcC byte 21 lower 2 bits + 1 is NALU length size. Anything
+        // other than 4 is exotic enough that we bail rather than risk
+        // mis-parsing.
+        let naluLengthSize = Int(extradata[21] & 0x03) + 1
+        guard naluLengthSize == 4 else { return nil }
+
+        var vps: [UInt8]?
+        var sps: [UInt8]?
+        var pps: [UInt8]?
+        let packetBudget = 16
+        var packetsScanned = 0
+
+        while packetsScanned < packetBudget {
+            let readResult: UnsafeMutablePointer<AVPacket>?
+            do {
+                readResult = try demuxer.readPacket()
+            } catch {
+                break
+            }
+            guard let pkt = readResult else { break }
+            defer {
+                av_packet_unref(pkt)
+                var maybePkt: UnsafeMutablePointer<AVPacket>? = pkt
+                av_packet_free(&maybePkt)
+            }
+            packetsScanned += 1
+            if pkt.pointee.stream_index != videoStreamIndex { continue }
+            guard let pktData = pkt.pointee.data else { continue }
+            let pktSize = Int(pkt.pointee.size)
+
+            var offset = 0
+            while offset + naluLengthSize <= pktSize {
+                var nalLen = 0
+                for i in 0..<naluLengthSize {
+                    nalLen = (nalLen << 8) | Int(pktData[offset + i])
+                }
+                offset += naluLengthSize
+                if nalLen == 0 || offset + nalLen > pktSize { break }
+                // HEVC NAL header: byte 0 = forbidden_zero_bit(1) +
+                // nal_unit_type(6) + layer_id high bit(1). NAL unit
+                // type is bits 1..6 of byte 0.
+                let nalType = (Int(pktData[offset]) >> 1) & 0x3F
+                let nalBytes = Array(UnsafeBufferPointer(start: pktData + offset, count: nalLen))
+                switch nalType {
+                case 32: if vps == nil { vps = nalBytes }
+                case 33: if sps == nil { sps = nalBytes }
+                case 34: if pps == nil { pps = nalBytes }
+                default: break
+                }
+                offset += nalLen
+            }
+
+            if vps != nil && sps != nil && pps != nil { break }
+        }
+
+        guard let vps, let sps, let pps else { return nil }
+
+        // Assemble a proper hvcC: keep the source's 22-byte header
+        // (configurationVersion + profile / level / chroma / temporal
+        // layer fields), set numOfArrays = 3, then append VPS / SPS /
+        // PPS arrays. Each array: 1 byte (arrayCompleteness=1 +
+        // reserved=0 + nalUnitType), 2 bytes numNalus = 1, 2 bytes
+        // nalUnitLength, NAL bytes.
+        var hvcC: [UInt8] = []
+        hvcC.reserveCapacity(22 + 1 + 5 * 3 + vps.count + sps.count + pps.count)
+        for i in 0..<22 { hvcC.append(extradata[i]) }
+        hvcC.append(3)
+        func appendArray(nalUnitType: UInt8, nal: [UInt8]) {
+            hvcC.append(0x80 | (nalUnitType & 0x3F))
+            hvcC.append(0); hvcC.append(1)
+            let nl = UInt16(nal.count)
+            hvcC.append(UInt8(nl >> 8)); hvcC.append(UInt8(nl & 0xFF))
+            hvcC.append(contentsOf: nal)
+        }
+        appendArray(nalUnitType: 32, nal: vps)
+        appendArray(nalUnitType: 33, nal: sps)
+        appendArray(nalUnitType: 34, nal: pps)
+        return hvcC
     }
 
     /// Validate that `index` points at an audio stream in the demuxer's

@@ -62,19 +62,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// Optional color-signaling override forwarded to the muxer.
         /// See `MP4SegmentMuxer.ColorOverride`.
         let colorOverride: MP4SegmentMuxer.ColorOverride?
+        /// Optional replacement for the source's `codecpar.extradata`
+        /// before `avformat_write_header`. See
+        /// `MP4SegmentMuxer.VideoConfig.extradataOverride`.
+        let extradataOverride: [UInt8]?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
             timeBase: AVRational,
             codecTagOverride: String?,
             stripDolbyVisionMetadata: Bool = false,
-            colorOverride: MP4SegmentMuxer.ColorOverride? = nil
+            colorOverride: MP4SegmentMuxer.ColorOverride? = nil,
+            extradataOverride: [UInt8]? = nil
         ) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.codecTagOverride = codecTagOverride
             self.stripDolbyVisionMetadata = stripDolbyVisionMetadata
             self.colorOverride = colorOverride
+            self.extradataOverride = extradataOverride
         }
     }
 
@@ -566,7 +572,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             timeBase: videoConfig.timeBase,
             codecTagOverride: videoConfig.codecTagOverride,
             stripDolbyVisionMetadata: videoConfig.stripDolbyVisionMetadata,
-            colorOverride: videoConfig.colorOverride
+            colorOverride: videoConfig.colorOverride,
+            extradataOverride: videoConfig.extradataOverride
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
             MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase)
