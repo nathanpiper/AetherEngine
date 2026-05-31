@@ -62,7 +62,22 @@ struct FrameCacheTests {
     func clear() {
         let cache = FrameCache(thumbnailLimit: 4, snapshotLimit: 2, thumbnailBucketSeconds: 1.0)
         cache.set(dummyImage(), mode: .thumbnail, seconds: 1.0)
+        cache.set(dummyImage(), mode: .snapshot, seconds: 2.0)
         cache.clear()
         #expect(cache.get(mode: .thumbnail, seconds: 1.0) == nil)
+        #expect(cache.get(mode: .snapshot, seconds: 2.0) == nil)
+    }
+
+    @Test("Thumbnail eviction does not affect snapshot store")
+    func perModeLimitIndependence() {
+        let cache = FrameCache(thumbnailLimit: 2, snapshotLimit: 2, thumbnailBucketSeconds: 1.0)
+        let snap = dummyImage()
+        cache.set(snap, mode: .snapshot, seconds: 5.0)
+        // Insert 3 distinct thumbnail buckets, forcing thumbnail eviction.
+        cache.set(dummyImage(), mode: .thumbnail, seconds: 10.0)
+        cache.set(dummyImage(), mode: .thumbnail, seconds: 20.0)
+        cache.set(dummyImage(), mode: .thumbnail, seconds: 30.0)
+        // Snapshot store must be untouched by thumbnail eviction.
+        #expect(cache.get(mode: .snapshot, seconds: 5.0) === snap)
     }
 }

@@ -17,8 +17,12 @@ final class FrameCache {
     private let thumbnailLimit: Int
     private let snapshotLimit: Int
     private let thumbnailBucketSeconds: Double
+    // Fixed: snapshots are always frame-accurate, so a 0.1 s grid (~3
+    // frames at 30 fps) is fine-grained enough for any source.
     private static let snapshotBucketSeconds: Double = 0.1
 
+    // Each FrameMode case needs a matching store + order pair below, plus
+    // mirroring in get/set/clear. Add both when introducing a new case.
     /// Insertion/use order per mode, front = most recently used. Holds
     /// the bucket keys; `store` holds the payloads.
     private var thumbnailOrder: [Int] = []
@@ -27,6 +31,7 @@ final class FrameCache {
     private var snapshotStore: [Int: CGImage] = [:]
 
     init(thumbnailLimit: Int, snapshotLimit: Int, thumbnailBucketSeconds: Double) {
+        precondition(thumbnailBucketSeconds > 0, "thumbnailBucketSeconds must be positive")
         self.thumbnailLimit = thumbnailLimit
         self.snapshotLimit = snapshotLimit
         self.thumbnailBucketSeconds = thumbnailBucketSeconds
