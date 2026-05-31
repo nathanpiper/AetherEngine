@@ -22,10 +22,18 @@ public actor FrameExtractor {
     private final class CancelToken: @unchecked Sendable {
         private let lock = NSLock()
         private var _cancelled = false
-        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return _cancelled
+        }
         func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
     }
     private var currentToken: CancelToken?
+
+    /// Set by `shutdown()`. Once true, the extractor refuses further
+    /// work instead of lazily reopening a closed context.
+    private var isShutDown = false
 
     public init(url: URL, httpHeaders: [String: String] = [:]) {
         self.context = FrameDecodeContext(url: url, httpHeaders: httpHeaders)
@@ -44,27 +52,36 @@ public actor FrameExtractor {
     }
 
     public func snapshot(at seconds: Double, maxSize: CGSize? = nil) async -> CGImage? {
+        // targetWidth is inert for snapshot; FrameDecodeContext.clampedWidth governs size.
         await produce(at: seconds, mode: .snapshot, targetWidth: 0, maxSize: maxSize)
     }
 
     /// Open the decode context ahead of the first request to hide
     /// cold-start latency (e.g. at the start of a scrub gesture).
     public func prewarm() async {
+        guard !isShutDown else { return }
         let context = self.context
         await runOnQueue { try? context.ensureOpen() }
     }
 
-    /// Immediate, full teardown of the decode context and cache.
-    public func shutdown() {
+    /// Permanently tear down the decode context and clear the cache.
+    /// Awaits the teardown on the decode queue, so when this returns the
+    /// FFmpeg demuxer / codec / sws resources are fully released. After
+    /// `shutdown()` the extractor is dead: further `thumbnail` /
+    /// `snapshot` / `prewarm` calls return nil / no-op and do NOT reopen
+    /// the context. Create a new `FrameExtractor` to extract again.
+    public func shutdown() async {
+        isShutDown = true
         currentToken?.cancel()
         cache.clear()
         let context = self.context
-        decodeQueue.async { context.close() }
+        await runOnQueue { context.close() }
     }
 
     // MARK: - Core
 
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
+        guard !isShutDown else { return nil }
         if let hit = cache.get(mode: mode, seconds: seconds) {
             return hit
         }
