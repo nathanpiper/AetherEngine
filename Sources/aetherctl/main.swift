@@ -23,6 +23,9 @@
 
 import Foundation
 import Darwin
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import AetherEngine
 
 // Disable stdout buffering so `swift run aetherctl ... > log.txt` or
@@ -43,6 +46,7 @@ private func printUsage() {
       aetherctl serve [--no-dv] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
+      aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -55,6 +59,14 @@ private func printUsage() {
     Flags (swdecode only):
       --frames N     Max packets to read / frames to wait for.
                      Default 100.
+
+    Flags (extract only):
+      --at <sec>     Seek position in seconds (default 60.0).
+      --snapshot     Frame-accurate decode at full resolution instead
+                     of nearest-keyframe thumbnail.
+      --width <px>   Max output width for thumbnail mode (default 320).
+      --loops <n>    Repeat extraction N times, cycling through 8
+                     positions. Useful with `leaks --atExit`.
 
     Subcommands:
       probe     Open the demuxer, dump format + streams + duration, exit.
@@ -85,6 +97,13 @@ private func printUsage() {
                 metadata. Tests the SW-pipeline path without needing
                 a display layer. Use for AV1, VP9, MPEG-4 Part 2,
                 MPEG-2, VC-1 sources.
+
+      extract   Extract a still frame from a source. Thumbnail mode
+                (default) seeks to the nearest keyframe and downscales
+                to --width. Snapshot mode (--snapshot) decodes
+                frame-accurately at full resolution. Use --loops N
+                with `leaks --atExit` to detect memory leaks.
+                Writes the first frame to /tmp/aetherctl-extract-<mode>.png.
     """)
 }
 
@@ -331,6 +350,86 @@ private func runSWDecode(url: URL, maxPackets: Int) -> Int32 {
     return 0
 }
 
+// MARK: - extract
+
+/// Drive an async actor call to completion from the synchronous CLI.
+private func runBlocking<T: Sendable>(_ work: @escaping @Sendable () async -> T) -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = UncheckedBox<T?>(nil)
+    Task {
+        box.value = await work()
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value!
+}
+
+private final class UncheckedBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
+private func writePNG(_ image: CGImage, to path: String) -> Bool {
+    let url = URL(fileURLWithPath: path)
+    guard let dest = CGImageDestinationCreateWithURL(
+        url as CFURL, UTType.png.identifier as CFString, 1, nil
+    ) else { return false }
+    CGImageDestinationAddImage(dest, image, nil)
+    return CGImageDestinationFinalize(dest)
+}
+
+private func runExtract(url: URL, at seconds: Double, mode: FrameMode, loops: Int, maxWidth: Int) -> Int32 {
+    EngineLog.handler = { print($0) }
+    print("aetherctl extract: \(url.absoluteString) at=\(seconds)s mode=\(mode) loops=\(loops)")
+    print("")
+
+    let extractor = FrameExtractor(url: url, httpHeaders: [:])
+
+    var produced = 0
+    let start = Date()
+    let effectiveLoops = max(1, loops)
+    for i in 0..<effectiveLoops {
+        // Cycle positions within a bounded in-range window so every
+        // iteration really decodes (and short clips do not run past
+        // EOF). 8 distinct 1 s buckets is enough to defeat trivial
+        // cache short-circuiting, especially in snapshot mode where the
+        // cache holds only 2 entries.
+        let pos = seconds + Double(i % 8) * 1.0
+        let image: CGImage? = runBlocking {
+            switch mode {
+            case .thumbnail: return await extractor.thumbnail(at: pos, maxWidth: maxWidth)
+            case .snapshot:  return await extractor.snapshot(at: pos, maxSize: nil)
+            }
+        }
+        if let image {
+            produced += 1
+            if i == 0 {
+                let out = "/tmp/aetherctl-extract-\(mode).png"
+                if writePNG(image, to: out) {
+                    print("Wrote \(image.width)x\(image.height) -> \(out)")
+                } else {
+                    print("ERROR: could not write \(out)")
+                }
+            }
+        } else {
+            print("Frame \(i) [\(mode)] at \(pos)s: (nil)")
+        }
+    }
+    let elapsed = Date().timeIntervalSince(start)
+
+    // Deterministic teardown so a `leaks --atExit` run sees a fully
+    // released context (no lingering demuxer / connection / FFmpeg alloc).
+    runBlocking { await extractor.shutdown() }
+
+    print("")
+    print("=== EXTRACT RESULT ===")
+    print("Frames produced:  \(produced)/\(effectiveLoops)")
+    print("Elapsed:          \(String(format: "%.2f", elapsed))s")
+    print("Avg per frame:    \(String(format: "%.1f", elapsed / Double(effectiveLoops) * 1000))ms")
+    print("======================")
+    return produced > 0 ? 0 : 1
+}
+
 // MARK: - Dispatch
 
 let args = CommandLine.arguments
@@ -365,11 +464,25 @@ private func takeIntFlag(_ name: String, from rest: inout [String]) -> Int? {
     return value
 }
 
+/// Pluck a `--key value` pair out of the rest-args list, returning
+/// the value as Double. Returns nil if absent or unparseable.
+private func takeDoubleFlag(_ name: String, from rest: inout [String]) -> Double? {
+    guard let idx = rest.firstIndex(of: name),
+          idx + 1 < rest.count,
+          let value = Double(rest[idx + 1]) else { return nil }
+    rest.removeSubrange(idx...(idx + 1))
+    return value
+}
+
 // Subcommand path: explicit subcommand + flags + url.
-if ["probe", "serve", "validate", "swdecode"].contains(first) {
+if ["probe", "serve", "validate", "swdecode", "extract"].contains(first) {
     var rest = Array(args.dropFirst(2))
     let noDV = takeFlag("--no-dv", from: &rest)
     let framesOverride = takeIntFlag("--frames", from: &rest)
+    let atSeconds = takeDoubleFlag("--at", from: &rest) ?? 60.0
+    let extractLoops = takeIntFlag("--loops", from: &rest) ?? 1
+    let extractWidth = takeIntFlag("--width", from: &rest) ?? 320
+    let snapshotMode = takeFlag("--snapshot", from: &rest)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
         print("")
@@ -387,6 +500,14 @@ if ["probe", "serve", "validate", "swdecode"].contains(first) {
         exit(runValidate(url: url, dvModeAvailable: dvModeAvailable))
     case "swdecode":
         exit(runSWDecode(url: url, maxPackets: framesOverride ?? 100))
+    case "extract":
+        exit(runExtract(
+            url: url,
+            at: atSeconds,
+            mode: snapshotMode ? .snapshot : .thumbnail,
+            loops: extractLoops,
+            maxWidth: extractWidth
+        ))
     default:
         printUsage()
         exit(64)
