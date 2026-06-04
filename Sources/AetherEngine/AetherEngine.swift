@@ -2034,6 +2034,17 @@ public final class AetherEngine: ObservableObject {
         softwareHost?.stop()
         softwareHost = nil
 
+        // Mirror teardown for the audio-only path. stop() halts the
+        // demux loop, flushes + releases the renderer / synchronizer,
+        // and closes the host's own Demuxer. Clearing audioHost here is
+        // what makes a music -> video handoff (and vice versa) start
+        // from a clean slate: the engine is a process-wide singleton, so
+        // a lingering audioHost would keep the old synchronizer's clock
+        // and renderer alive under the next session.
+        audioCancellables.removeAll()
+        audioHost?.stop()
+        audioHost = nil
+
         if resetDisplayCriteria {
             displayCriteria.reset()
         }
