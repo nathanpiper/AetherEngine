@@ -419,25 +419,34 @@ public final class AetherEngine: ObservableObject {
         // Console.app + the host handler from the very first call.
         FFmpegLogBridge.install()
 
-        // Configure audio session for multichannel playback. AVPlayer
-        // needs `.playback` + `.moviePlayback` + multichannel-content
-        // enabled before its first asset opens, otherwise output is
-        // forced to stereo. The `.longFormAudio` policy keeps audio
-        // alive across rapid app-switch flips.
+        // Declare the audio session's category + multichannel support,
+        // but do NOT activate the session or pin a preferred channel
+        // count here.
+        //
+        // Issue #24: activating the shared session once at process launch
+        // (the engine is a process-wide singleton) latches it against
+        // whatever the HDMI route reports at that instant. With tvOS
+        // "Continuous Audio Connection" off the link idles at stereo
+        // (output=2) at launch, the route gets pinned, and no later
+        // AVAudioSession call (setActive / setPreferred / deactivate +
+        // reactivate, all tried on device) can lift it — a 5.1 EAC3 asset
+        // then downmixes to stereo. The native video path wraps its
+        // AVPlayer in AVPlayerViewController, which owns and activates the
+        // session per playback; letting AVKit drive activation lets tvOS
+        // auto-negotiate the PCM <-> Dolby route switch against the live
+        // sink. The renderer paths (SoftwarePlaybackHost / Audio*Host) do
+        // their own activation via `activateRendererAudioSession()` since
+        // they render through AVSampleBufferAudioRenderer / a bare
+        // AVPlayer with no AVPlayerViewController to manage the session.
         #if os(iOS) || os(tvOS)
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
             try session.setSupportsMultichannelContent(true)
-            try session.setActive(true)
         } catch {
             EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
         }
-        let maxCh = session.maximumOutputNumberOfChannels
-        if maxCh > 2 {
-            try? session.setPreferredOutputNumberOfChannels(maxCh)
-        }
-        EngineLog.emit("[AetherEngine] AVAudioSession: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels), output=\(session.outputNumberOfChannels)", category: .engine)
+        EngineLog.emit("[AetherEngine] AVAudioSession: category set, not activated (AVKit drives activation) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
         #endif
 
         setupLifecycleObservers()
@@ -1173,12 +1182,33 @@ public final class AetherEngine: ObservableObject {
     /// `loadNative`: host loads the URL itself (no HLS-fMP4 wrapper —
     /// the SW pipeline reads the source directly through its own
     /// Demuxer).
+    /// Activate the shared audio session for the renderer paths that have
+    /// no AVPlayerViewController to own activation: SoftwarePlaybackHost
+    /// (FFmpeg decode -> AVSampleBufferAudioRenderer) and the audio-only
+    /// hosts. The native AVPlayer video path deliberately does NOT call
+    /// this — AVKit activates per playback so tvOS can auto-negotiate the
+    /// HDMI route (issue #24). Restores the preferred-channel hint the
+    /// init path used to set, now scoped to the renderer paths.
+    private func activateRendererAudioSession() {
+        #if os(iOS) || os(tvOS)
+        let session = AVAudioSession.sharedInstance()
+        do { try session.setActive(true) }
+        catch {
+            EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
+        }
+        let maxCh = session.maximumOutputNumberOfChannels
+        if maxCh > 2 { try? session.setPreferredOutputNumberOfChannels(maxCh) }
+        EngineLog.emit("[AetherEngine] renderer audio session active: maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+        #endif
+    }
+
     private func loadSoftware(
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
         audioSourceStreamIndex: Int32?
     ) async throws {
+        activateRendererAudioSession()
         let host = SoftwarePlaybackHost()
         host.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
@@ -1244,6 +1274,7 @@ public final class AetherEngine: ObservableObject {
         startPosition: Double?,
         audioSourceStreamIndex: Int32?
     ) async throws {
+        activateRendererAudioSession()
         let host = AudioPlaybackHost()
         self.audioHost = host
         // Audio path tracks source PTS directly: no AVPlayer-clock shift.
@@ -1306,6 +1337,7 @@ public final class AetherEngine: ObservableObject {
         // Reuse the persistent host (and its MPNowPlayingSession) across
         // tracks; only create it the first time. host.load() below swaps the
         // item via replaceCurrentItem on the same AVPlayer.
+        activateRendererAudioSession()
         let host = audioAVPlayerHost ?? AudioAVPlayerHost()
         self.audioAVPlayerHost = host
         self.audioAVPlayerActive = true
