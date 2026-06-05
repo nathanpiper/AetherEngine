@@ -74,8 +74,9 @@ final class AudioAVPlayerHost {
 
     /// Now-playing metadata (title / artist / album / artwork as
     /// AVMetadataItems) applied to each loaded AVPlayerItem's
-    /// externalMetadata. With the session's automaticallyPublishesNowPlaying-
-    /// Info, this is how the metadata reaches the system Now-Playing surface.
+    /// externalMetadata, so it survives a back-to-back item swap. The host
+    /// app additionally publishes Now-Playing through the session's
+    /// nowPlayingInfoCenter.
     private var pendingExternalMetadata: [AVMetadataItem] = []
 
     // MARK: - Init
@@ -86,24 +87,18 @@ final class AudioAVPlayerHost {
         // Become the active Now-Playing app. We deliberately do NOT enable
         // automaticallyPublishesNowPlayingInfo: the host app writes the
         // metadata + accurate elapsed/rate to nowPlayingSession.nowPlayingInfo-
-        // Center itself (it owns the queue + artwork), and auto-publish was
-        // part of the earlier mixed setup that only half-worked.
-        nowPlayingSession.becomeActiveIfPossible(completion: { success in
-            EngineLog.emit("[AudioAVPlayerHost] nowPlayingSession becomeActiveIfPossible (init) success=\(success)", category: .swPlayback)
-        })
+        // Center itself (it owns the queue + artwork).
+        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
         #endif
     }
 
     /// Re-assert this session as the active Now-Playing app. Called when a
     /// track starts so the player reclaims Now-Playing ownership if it was
-    /// lost (the binding is what keeps the Home badge + remote commands alive
-    /// across a background pause).
+    /// lost (the binding is what keeps the Home overlay + remote commands
+    /// alive across a background pause).
     func becomeActiveNowPlaying() {
         #if os(tvOS) || os(iOS)
-        let active = nowPlayingSession.isActive
-        nowPlayingSession.becomeActiveIfPossible(completion: { success in
-            EngineLog.emit("[AudioAVPlayerHost] nowPlayingSession becomeActiveIfPossible (track start, wasActive=\(active)) success=\(success)", category: .swPlayback)
-        })
+        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
         #endif
     }
 
