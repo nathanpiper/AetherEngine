@@ -37,17 +37,23 @@ final class AudioAVPlayerHost {
     /// `replaceCurrentItem` swaps for the lifetime of this host.
     let avPlayer = AVPlayer()
 
-    // NOTE: No MPNowPlayingSession. Apple's guidance (WWDC22 "Explore media
-    // metadata publishing and playback interactions") is explicit that
-    // MPNowPlayingSession should NOT be used on tvOS: it is an iOS/iPadOS
-    // multi-session API, and each session owns its OWN private
-    // MPRemoteCommandCenter, which splits Siri Remote transport routing (the
-    // remote ends up talking to the session's command center while the host
-    // registers handlers elsewhere, so only pauseCommand ever lands). The
-    // correct tvOS audio path is the system-shared MPNowPlayingInfoCenter +
-    // MPRemoteCommandCenter.shared(), driven host-side by the Sodalite
-    // coordinator. This host just owns the AVPlayer; it publishes nothing
-    // to Now-Playing itself.
+    #if os(tvOS) || os(iOS)
+    /// The Now-Playing session bound to THIS player. On tvOS 14+ the SHARED
+    /// MPRemoteCommandCenter / MPNowPlayingInfoCenter are not reliably bound
+    /// to a bare AVPlayer: while actively rendering the system tolerates the
+    /// shared center enough to deliver pauseCommand, but the moment output
+    /// stops in the background (pause -> rate 0) the app is dropped as the
+    /// active Now-Playing app and the shared center stops receiving ANY
+    /// command (so the play button never comes back). Binding a session to
+    /// the player keeps that ownership across a pause. The full WWDC22
+    /// guidance is "MPNowPlayingSession shouldn't be used on tvOS WHEN USING
+    /// AVKit" (AVKit owns its own session) -- for a bare AVPlayer with custom
+    /// UI, owning the session explicitly is the sanctioned path. The host app
+    /// registers commands on `nowPlayingSession.remoteCommandCenter` and
+    /// writes metadata to `nowPlayingSession.nowPlayingInfoCenter`; mixing in
+    /// the shared singletons is what produces the half-working state.
+    let nowPlayingSession: MPNowPlayingSession
+    #endif
 
     // MARK: - Private state
 
@@ -74,7 +80,27 @@ final class AudioAVPlayerHost {
 
     // MARK: - Init
 
-    init() {}
+    init() {
+        #if os(tvOS) || os(iOS)
+        nowPlayingSession = MPNowPlayingSession(players: [avPlayer])
+        // Become the active Now-Playing app. We deliberately do NOT enable
+        // automaticallyPublishesNowPlayingInfo: the host app writes the
+        // metadata + accurate elapsed/rate to nowPlayingSession.nowPlayingInfo-
+        // Center itself (it owns the queue + artwork), and auto-publish was
+        // part of the earlier mixed setup that only half-worked.
+        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        #endif
+    }
+
+    /// Re-assert this session as the active Now-Playing app. Called when a
+    /// track starts so the player reclaims Now-Playing ownership if it was
+    /// lost (the binding is what keeps the Home badge + remote commands alive
+    /// across a background pause).
+    func becomeActiveNowPlaying() {
+        #if os(tvOS) || os(iOS)
+        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        #endif
+    }
 
     // MARK: - Load
 

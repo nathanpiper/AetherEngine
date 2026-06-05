@@ -1310,8 +1310,9 @@ public final class AetherEngine: ObservableObject {
         self.audioAVPlayerHost = host
         self.audioAVPlayerActive = true
         self.playlistShiftSeconds = 0
-        // Apply any metadata the host app pre-staged so the new AVPlayerItem
-        // carries it (the session auto-publishes it to Now-Playing).
+        // Reclaim Now-Playing ownership for this session on each track start,
+        // so the Home badge + remote commands stay bound across a pause.
+        host.becomeActiveNowPlaying()
         host.setExternalMetadata(pendingExternalMetadata)
 
         audioNativeCancellables.removeAll()
@@ -1504,10 +1505,18 @@ public final class AetherEngine: ObservableObject {
     /// and brings up a fresh one, so a one-shot assignment goes stale).
     @Published public private(set) var currentAVPlayer: AVPlayer?
 
-    // NOTE: No `audioNowPlayingSession` accessor. The AVPlayer audio path
-    // does NOT use MPNowPlayingSession (wrong API on tvOS, see
-    // AudioAVPlayerHost). The host app drives the system Now-Playing surface
-    // through the shared MPNowPlayingInfoCenter + MPRemoteCommandCenter.
+    #if os(tvOS) || os(iOS)
+    /// The Now-Playing session bound to the active AVPlayer audio path, or
+    /// nil when that path is not active (FFmpeg audio / video / idle). The
+    /// host app registers transport commands on its `remoteCommandCenter` and
+    /// writes metadata to its `nowPlayingInfoCenter` so the app stays the
+    /// active Now-Playing app across a background pause (the shared singletons
+    /// drop a paused bare AVPlayer on tvOS, killing the Home badge + the
+    /// remote play route). See AudioAVPlayerHost for the full rationale.
+    public var audioNowPlayingSession: MPNowPlayingSession? {
+        audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
+    }
+    #endif
 
     /// Pending externalMetadata for the next native load. Set via
     /// `setExternalMetadata(_:)` before `load(url:)`; consumed when
