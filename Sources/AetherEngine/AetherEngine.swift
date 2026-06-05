@@ -280,10 +280,16 @@ public final class AetherEngine: ObservableObject {
     /// the engine's own surface. Cleared on stopInternal.
     private var audioCancellables = Set<AnyCancellable>()
 
-    /// Native AVPlayer audio host. Non-nil only while an audio-only session
-    /// whose codec AVPlayer can decode natively is active. Mutually
-    /// exclusive with the other hosts.
+    /// Native AVPlayer audio host. Created lazily on the first AVPlayer
+    /// audio load and then KEPT for the engine's lifetime, reused across
+    /// tracks via replaceCurrentItem. This is deliberate: its
+    /// MPNowPlayingSession must persist so the system sees one stable
+    /// Now-Playing app across a playlist. Recreating it per track (a fresh
+    /// session each time) prevented the background Siri Remote + system
+    /// Now-Playing UI from ever stabilising. `audioAVPlayerActive` gates
+    /// whether this host is the CURRENT backend.
     private var audioAVPlayerHost: AudioAVPlayerHost?
+    private var audioAVPlayerActive = false
     private var audioNativeCancellables = Set<AnyCancellable>()
 
     /// Periodic memory diagnostic. Emits the process's resident memory
@@ -1297,8 +1303,12 @@ public final class AetherEngine: ObservableObject {
         startPosition: Double?,
         httpHeaders: [String: String]
     ) async throws {
-        let host = AudioAVPlayerHost()
+        // Reuse the persistent host (and its MPNowPlayingSession) across
+        // tracks; only create it the first time. host.load() below swaps the
+        // item via replaceCurrentItem on the same AVPlayer.
+        let host = audioAVPlayerHost ?? AudioAVPlayerHost()
         self.audioAVPlayerHost = host
+        self.audioAVPlayerActive = true
         self.playlistShiftSeconds = 0
         // Apply any metadata the host app pre-staged so the new AVPlayerItem
         // carries it (the session auto-publishes it to Now-Playing).
@@ -1367,7 +1377,7 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Transport
 
     public func play() {
-        if let host = audioAVPlayerHost {
+        if audioAVPlayerActive, let host = audioAVPlayerHost {
             host.play()
         } else if let host = audioHost {
             host.play()
@@ -1382,7 +1392,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
-        if let host = audioAVPlayerHost {
+        if audioAVPlayerActive, let host = audioAVPlayerHost {
             host.pause()
         } else if let host = audioHost {
             host.pause()
@@ -1414,7 +1424,7 @@ public final class AetherEngine: ObservableObject {
         // has no AVPlayer and no competing transport owner, so its `state`
         // is authoritative.
         let isPlaying: Bool
-        if audioAVPlayerHost != nil {
+        if audioAVPlayerActive {
             // Audio host has no competing transport owner, so `state` is
             // authoritative (same reasoning as the software host).
             isPlaying = (state == .playing)
@@ -1453,7 +1463,7 @@ public final class AetherEngine: ObservableObject {
         }
         let target = max(0, min(seconds, duration))
         state = .seeking
-        if let host = audioAVPlayerHost {
+        if audioAVPlayerActive, let host = audioAVPlayerHost {
             await host.seek(to: target)
         } else if let host = audioHost {
             await host.seek(to: target)
@@ -1514,7 +1524,7 @@ public final class AetherEngine: ObservableObject {
     /// MPNowPlayingInfoCenter path cannot convey paused state to a
     /// third-party app, so the remote button only ever pauses).
     public var audioNowPlayingSession: MPNowPlayingSession? {
-        audioAVPlayerHost?.nowPlayingSession
+        audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
     }
     #endif
 
@@ -1544,7 +1554,7 @@ public final class AetherEngine: ObservableObject {
 
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
-        get { audioAVPlayerHost?.volume ?? audioHost?.volume ?? softwareHost?.volume ?? nativeHost?.avPlayer.volume ?? 1.0 }
+        get { (audioAVPlayerActive ? audioAVPlayerHost?.volume : nil) ?? audioHost?.volume ?? softwareHost?.volume ?? nativeHost?.avPlayer.volume ?? 1.0 }
         set {
             audioAVPlayerHost?.volume = newValue
             audioHost?.volume = newValue
@@ -1558,7 +1568,7 @@ public final class AetherEngine: ObservableObject {
     /// rate goes through the synchronizer and audio plays at the
     /// changed rate without pitch correction.
     public func setRate(_ rate: Float) {
-        if let host = audioAVPlayerHost {
+        if audioAVPlayerActive, let host = audioAVPlayerHost {
             host.setRate(rate)
         } else if let host = audioHost {
             host.setRate(rate)
@@ -2204,9 +2214,13 @@ public final class AetherEngine: ObservableObject {
         audioHost?.stop()
         audioHost = nil
 
+        // The AVPlayer audio host is KEPT alive across loads (its
+        // MPNowPlayingSession must persist for stable system Now-Playing).
+        // Mark it inactive and stop playback, but do NOT release it; the
+        // next audio load reuses it via replaceCurrentItem.
         audioNativeCancellables.removeAll()
+        audioAVPlayerActive = false
         audioAVPlayerHost?.stop()
-        audioAVPlayerHost = nil
 
         if resetDisplayCriteria {
             displayCriteria.reset()
