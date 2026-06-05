@@ -1514,19 +1514,10 @@ public final class AetherEngine: ObservableObject {
     /// and brings up a fresh one, so a one-shot assignment goes stale).
     @Published public private(set) var currentAVPlayer: AVPlayer?
 
-    #if os(tvOS) || os(iOS)
-    /// The system Now-Playing session for the active AVPlayer audio path,
-    /// or nil when that path is not active (FFmpeg audio / video / idle).
-    /// Hosts set now-playing metadata and register transport commands on
-    /// its `nowPlayingInfoCenter` / `remoteCommandCenter` so the system
-    /// tracks play/pause directly from the AVPlayer, which is what makes
-    /// the Siri Remote play/pause button route correctly (the manual
-    /// MPNowPlayingInfoCenter path cannot convey paused state to a
-    /// third-party app, so the remote button only ever pauses).
-    public var audioNowPlayingSession: MPNowPlayingSession? {
-        audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
-    }
-    #endif
+    // NOTE: No `audioNowPlayingSession` accessor. The AVPlayer audio path
+    // does NOT use MPNowPlayingSession (wrong API on tvOS, see
+    // AudioAVPlayerHost). The host app drives the system Now-Playing surface
+    // through the shared MPNowPlayingInfoCenter + MPRemoteCommandCenter.
 
     /// Pending externalMetadata for the next native load. Set via
     /// `setExternalMetadata(_:)` before `load(url:)`; consumed when

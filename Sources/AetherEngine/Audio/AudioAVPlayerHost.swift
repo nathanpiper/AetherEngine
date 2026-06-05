@@ -37,20 +37,17 @@ final class AudioAVPlayerHost {
     /// `replaceCurrentItem` swaps for the lifetime of this host.
     let avPlayer = AVPlayer()
 
-    #if os(tvOS) || os(iOS)
-    /// Ties the AVPlayer to the system Now-Playing session. The system then
-    /// reads the play/pause state DIRECTLY from the player, which is what
-    /// makes the Siri Remote play/pause button route correctly. Without a
-    /// session a third-party app cannot tell the system it is paused
-    /// (MPNowPlayingInfoCenter.playbackState needs a private entitlement
-    /// the system silently drops), so the remote button only ever sends
-    /// pauseCommand and never playCommand. The host writes now-playing
-    /// metadata and registers transport commands on this session's
-    /// `nowPlayingInfoCenter` / `remoteCommandCenter` (driven from the
-    /// Sodalite coordinator, which owns the metadata + queue).
-    /// MPNowPlayingSession is unavailable on macOS, so this is gated.
-    let nowPlayingSession: MPNowPlayingSession
-    #endif
+    // NOTE: No MPNowPlayingSession. Apple's guidance (WWDC22 "Explore media
+    // metadata publishing and playback interactions") is explicit that
+    // MPNowPlayingSession should NOT be used on tvOS: it is an iOS/iPadOS
+    // multi-session API, and each session owns its OWN private
+    // MPRemoteCommandCenter, which splits Siri Remote transport routing (the
+    // remote ends up talking to the session's command center while the host
+    // registers handlers elsewhere, so only pauseCommand ever lands). The
+    // correct tvOS audio path is the system-shared MPNowPlayingInfoCenter +
+    // MPRemoteCommandCenter.shared(), driven host-side by the Sodalite
+    // coordinator. This host just owns the AVPlayer; it publishes nothing
+    // to Now-Playing itself.
 
     // MARK: - Private state
 
@@ -77,20 +74,7 @@ final class AudioAVPlayerHost {
 
     // MARK: - Init
 
-    init() {
-        #if os(tvOS) || os(iOS)
-        nowPlayingSession = MPNowPlayingSession(players: [avPlayer])
-        // Let the session derive playback state (play/pause), elapsed time,
-        // and duration DIRECTLY from the AVPlayer. This is the piece that
-        // makes the system know the real play/pause state, so the Siri
-        // Remote play/pause button and the system Now-Playing UI work
-        // WITHOUT the private set-playback-state entitlement. Title / artist
-        // / artwork are supplied separately via the AVPlayerItem's
-        // externalMetadata (set by the host app per track).
-        nowPlayingSession.automaticallyPublishesNowPlayingInfo = true
-        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
-        #endif
-    }
+    init() {}
 
     // MARK: - Load
 
