@@ -1310,13 +1310,9 @@ public final class AetherEngine: ObservableObject {
         self.audioAVPlayerHost = host
         self.audioAVPlayerActive = true
         self.playlistShiftSeconds = 0
-        // Expose the audio AVPlayer so the host app can mount it in an
-        // AVPlayerViewController. On tvOS that is what gives reliable system
-        // Now-Playing + Siri Remote (incl. pause/resume across a background),
-        // because AVKit owns the Now-Playing session internally. The manual
-        // MPNowPlayingSession / MPNowPlayingInfoCenter path could not keep a
-        // paused backgrounded bare AVPlayer bound (proven on device).
-        self.currentAVPlayer = host.avPlayer
+        // Reclaim Now-Playing ownership for this session on each track start,
+        // so the Home badge + remote commands stay bound across a pause.
+        host.becomeActiveNowPlaying()
         host.setExternalMetadata(pendingExternalMetadata)
 
         audioNativeCancellables.removeAll()
@@ -1509,9 +1505,18 @@ public final class AetherEngine: ObservableObject {
     /// and brings up a fresh one, so a one-shot assignment goes stale).
     @Published public private(set) var currentAVPlayer: AVPlayer?
 
-    // NOTE: No `audioNowPlayingSession` accessor. The audio path's system
-    // Now-Playing is driven by AVKit: the host app mounts `currentAVPlayer`
-    // in an AVPlayerViewController, which owns the session internally.
+    #if os(tvOS) || os(iOS)
+    /// The Now-Playing session bound to the active AVPlayer audio path, or
+    /// nil when that path is not active (FFmpeg audio / video / idle). The
+    /// host app registers transport commands on its `remoteCommandCenter` and
+    /// writes metadata to its `nowPlayingInfoCenter` so the app stays the
+    /// active Now-Playing app across a background pause (the shared singletons
+    /// drop a paused bare AVPlayer on tvOS, killing the Home badge + the
+    /// remote play route). See AudioAVPlayerHost for the full rationale.
+    public var audioNowPlayingSession: MPNowPlayingSession? {
+        audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
+    }
+    #endif
 
     /// Pending externalMetadata for the next native load. Set via
     /// `setExternalMetadata(_:)` before `load(url:)`; consumed when
@@ -2199,11 +2204,10 @@ public final class AetherEngine: ObservableObject {
         audioHost?.stop()
         audioHost = nil
 
-        // The AVPlayer audio host is KEPT alive across loads (one AVPlayer
-        // reused via replaceCurrentItem). Mark it inactive and stop playback,
-        // but do NOT release it; the next audio load reuses it. `currentAVPlayer`
-        // was already cleared above, so the host app's AVPlayerViewController
-        // detaches from the stopped player.
+        // The AVPlayer audio host is KEPT alive across loads (its
+        // MPNowPlayingSession must persist for stable system Now-Playing).
+        // Mark it inactive and stop playback, but do NOT release it; the
+        // next audio load reuses it via replaceCurrentItem.
         audioNativeCancellables.removeAll()
         audioAVPlayerActive = false
         audioAVPlayerHost?.stop()
