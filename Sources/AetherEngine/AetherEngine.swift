@@ -1557,6 +1557,18 @@ public final class AetherEngine: ObservableObject {
         state = .playing
     }
 
+    /// Seek to an absolute source-PTS position (seconds), the timeline
+    /// that Jellyfin media-segment markers and embedded subtitle cues
+    /// live on. On the native HLS path the AVPlayer clock sits at
+    /// `source_pts - playlistShiftSeconds`, so callers scheduling against
+    /// source time (skip-intro / skip-outro to a marker boundary) must
+    /// route through here. `seek(to:)` is AVPlayer-clock based and is for
+    /// scrubber-driven seeks that already speak that clock. `playlistShiftSeconds`
+    /// is 0 on the SW path, so this collapses to a plain seek there.
+    public func seek(toSourceTime seconds: Double) async {
+        await seek(to: seconds - playlistShiftSeconds)
+    }
+
     public func stop() {
         stopInternal()
         state = .idle
