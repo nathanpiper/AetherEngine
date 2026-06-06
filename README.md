@@ -48,6 +48,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Audio-only  | `LoadOptions.audioOnly` routes a source into a lean audio pipeline (no loopback server, no display layer, no video producer). Native-first: whitelisted codecs hand the URL straight to a bare `AVPlayer`, the rest decode through FFmpeg into `AVSampleBufferAudioRenderer`. Persistent per-player `MPNowPlayingSession` on tvOS / iOS keeps the system Now-Playing overlay live across a background pause |
 | Subtitles   | SubRip / ASS / SSA / WebVTT / mov_text streamed inline; PGS / HDMV PGS / DVB / DVD rendered as `CGImage` with normalised position; sidecar `.srt` / `.ass` / `.vtt` URLs decoded via short-lived context |
 | Frames      | Still-image extraction off-playback via `FrameExtractor`: `thumbnail` (nearest keyframe, downscaled, fast, for scrub previews / Recents) and `snapshot` (frame-accurate, full resolution, for user stills), both as `CGImage`. Isolated FFmpeg decode context, bounded LRU cache, idle-close lifecycle |
+| Metadata    | `MediaMetadata` parsed from the container on `load`: normalised title / artist / album / albumArtist tags plus embedded cover art. Published on the engine and carried in `SourceProbe`, so a host gets track info without its own tag parser. `aetherctl probe` prints it |
 | Seek        | Producer teardown + restart for backward / far-forward scrubs; short-range forward scrubs ride the cached segment window    |
 | Streaming   | Playback reads the source over one long-lived forward-streaming `URLSession` connection (VLC-style): bytes stream into a sliding window, a new request is issued only on a seek outside that window. Still extraction uses discrete Range chunks for random access; live transcode uses a single sequential GET |
 | Live        | Scaffold-level: `LoadOptions.isLive` opts the session in; engine publishes `@Published var isLive` for hosts, ignores `seek()`. H.264 / HEVC inside MPEG-TS routes through the native AVPlayer pipeline; MPEG-2 / MPEG-4 / VC-1 / VP8 / VP9 inside MPEG-TS routes through the SW pipeline. Sliding-window segment eviction for unbounded sessions is not yet implemented (long native-path sessions will accumulate cached segments) |
@@ -378,8 +379,9 @@ swift run aetherctl <url>                # alias for serve (backwards compat)
 
 `probe` opens the demuxer, prints the codec / resolution / frame rate
 of the video track, the audio track list (codec, channels, language,
-Atmos flag), the subtitle track list, then exits. No HLS server is
-started.
+Atmos flag), the subtitle track list, the parsed container metadata
+(`MediaMetadata`: title / artist / album / albumArtist + embedded cover
+art presence), then exits. No HLS server is started.
 
 `serve` is the original behavior. The CLI prints the loopback URL and
 parks until Ctrl-C; from another terminal you can:
