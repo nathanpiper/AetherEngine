@@ -25,7 +25,7 @@ import Libavutil
 /// Thread safety: AVIO callbacks run on the demux queue. Prefetch / streaming /
 /// persistent-connection delivery runs on dedicated background queues. Shared
 /// state protected by locks.
-final class AVIOReader: @unchecked Sendable {
+final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     private let url: URL
     private let extraHeaders: [String: String]
