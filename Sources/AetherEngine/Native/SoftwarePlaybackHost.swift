@@ -721,6 +721,27 @@ final class SoftwarePlaybackHost {
         // back to `initialClockTime` 50× per second and freeze playback.
         var clockArmed = false
 
+        // Live PTS-discontinuity reconciliation (SW path). A program
+        // boundary leaps the source PTS (forward or backward) far beyond
+        // normal frame spacing. Without compensation, the session edge
+        // (`newestPts - sessionStartPts`) would jump by the raw delta and the
+        // decoder clock would choke. We keep a running `discontinuityOffset`
+        // (in source-PTS seconds): on a detected jump we add
+        // `(jumpedPts - expectedContinuationPts)` to it, then subtract the
+        // offset from every subsequent packet's PTS BEFORE the live-edge note,
+        // the ring append, and the decoder stamping, so the whole pipeline
+        // sees one continuous timeline. The decoders are also flushed so they
+        // do not stall on the seam (same flush pattern the SW seek path uses).
+        //
+        // Threshold mirrors the native producer: 10 s, far above any frame
+        // interval or the look-behind inference, well below the synthetic
+        // +1000 s test jump. Live-only; non-live SW never enters this branch.
+        let discontinuityThresholdSeconds = 10.0
+        var prevRawVideoPtsSec = Double.nan
+        var frameIntervalSec = 0.0
+        var discontinuityOffsetSec = 0.0
+        var loggedSWDiscontinuity = false
+
         while !stopRequested() {
             if !isPlaying() {
                 condition.lock()
@@ -749,6 +770,69 @@ final class SoftwarePlaybackHost {
             }
 
             let streamIdx = packet.pointee.stream_index
+
+            // Live PTS-discontinuity detection + reconciliation. Runs before
+            // anything reads the packet's timestamps so the live-edge note,
+            // the ring append, and the decoder all see the reconciled
+            // (continuous) PTS. Detection keys on the VIDEO stream's raw pts;
+            // the resulting offset is applied to BOTH streams so audio stays
+            // aligned. Non-live SW skips this entirely.
+            if isLive, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+               packet.pointee.pts != Int64.min {
+                let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
+                if !prevRawVideoPtsSec.isNaN {
+                    let deltaSec = rawPtsSec - prevRawVideoPtsSec
+                    if abs(deltaSec) >= discontinuityThresholdSeconds {
+                        // Program boundary. The timeline should continue from
+                        // where it was: one frame past the previous packet.
+                        // Accrue (jumpedPts - expectedContinuationPts) into the
+                        // offset so post-jump PTS map back onto the prior
+                        // trajectory.
+                        let expectedContinuation = prevRawVideoPtsSec
+                            + (frameIntervalSec > 0 ? frameIntervalSec : 0)
+                        discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
+                        // Flush the decoders / renderer so they do not choke
+                        // on the seam (codec params may also have changed; a
+                        // flush is sufficient for the synthetic test, a fuller
+                        // reinit is the device-verify follow-up).
+                        videoDecoder.flush()
+                        audioDecoder?.flush()
+                        renderer.drainReorderBuffer()
+                        if !loggedSWDiscontinuity {
+                            loggedSWDiscontinuity = true
+                            EngineLog.emit(
+                                "[SWHost] live PTS discontinuity: prevPts="
+                                + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
+                                + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
+                                + "delta=\(String(format: "%.2f", deltaSec))s -> "
+                                + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
+                                + "(timeline held continuous)",
+                                category: .swPlayback
+                            )
+                        }
+                    } else if deltaSec > 0 {
+                        // Track the running frame interval from normal advance
+                        // so the expected-continuation estimate is accurate.
+                        frameIntervalSec = deltaSec
+                    }
+                }
+                prevRawVideoPtsSec = rawPtsSec
+            }
+
+            // Apply the accrued discontinuity offset to the packet's
+            // timestamps in-place (live only, once a jump has been seen). The
+            // offset is in source-PTS seconds; convert to this stream's TB
+            // ticks. After this, every downstream consumer (edge note, ring,
+            // decoder) operates on the continuous timeline.
+            if isLive, discontinuityOffsetSec != 0 {
+                let tbSec = (streamIdx == videoStreamIndex)
+                    ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                if tbSec > 0 {
+                    let offsetTicks = Int64((discontinuityOffsetSec / tbSec).rounded())
+                    if packet.pointee.pts != Int64.min { packet.pointee.pts -= offsetTicks }
+                    if packet.pointee.dts != Int64.min { packet.pointee.dts -= offsetTicks }
+                }
+            }
 
             // Live edge + DVR ring fill. Done BEFORE decode so the ring
             // holds every packet handed to the pipeline. Both video and

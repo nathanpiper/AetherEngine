@@ -84,7 +84,7 @@ private func printUsage() {
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio <url>
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--sw]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--sw] [--drop-after N] [--discontinuity-at N]
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -765,7 +765,8 @@ private func runLive(
     reportCacheBytes: Bool,
     rewindTest: Bool = false,
     forceSoftware: Bool = false,
-    dropAfter: Double? = nil
+    dropAfter: Double? = nil,
+    discontinuityAt: Double? = nil
 ) -> Int32 {
     EngineLog.handler = { print($0) }
 
@@ -783,6 +784,7 @@ private func runLive(
     print("aetherctl live: seed=\(resolvedSeed) seconds=\(playSeconds)" +
           (dvrWindow.map { " dvr-window=\($0)" } ?? " dvr-window=none (live-only floor)") +
           (dropAfter.map { " drop-after=\($0)s" } ?? "") +
+          (discontinuityAt.map { " discontinuity-at=\($0)s" } ?? "") +
           (measureRSS ? " measure-rss=true" : "") +
           (reportCacheBytes ? " report-cache-bytes=true" : ""))
 
@@ -794,6 +796,7 @@ private func runLive(
         return 1
     }
     fixture.dropAfterSeconds = dropAfter
+    fixture.discontinuityAfterSeconds = discontinuityAt
 
     let liveURL: URL
     do {
@@ -836,7 +839,8 @@ private func runLive(
         }
         box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds,
                                         dvrWindow: dvrWindow, measureRSS: measureRSS,
-                                        reportCacheBytes: reportCacheBytes)
+                                        reportCacheBytes: reportCacheBytes,
+                                        checkMonotonic: discontinuityAt != nil)
         fixture.stop()
         CFRunLoopStop(CFRunLoopGetMain())
     }
@@ -848,7 +852,8 @@ private func runLive(
 private func liveSmokeTest(url: URL, seconds playSeconds: Double,
                            dvrWindow: Double? = nil,
                            measureRSS: Bool = false,
-                           reportCacheBytes: Bool = false) async -> Int32 {
+                           reportCacheBytes: Bool = false,
+                           checkMonotonic: Bool = false) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -894,12 +899,52 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     var lastRSSTick: Double = 0
     var lastCacheTick: Double = 0
 
+    // Monotonicity tracking for the discontinuity test. The session
+    // timeline (currentTime on SW, and the live edge on both paths) must
+    // never jump backward and must never leap forward by the raw PTS delta
+    // (1000 s). We watch both per-tick maxima and the largest single-tick
+    // forward step; a leap >> the playhead-vs-realtime over-run would be the
+    // failure signature of an unhandled discontinuity.
+    var monotonicViolation = false
+    var maxForwardStep: Double = 0
+    var prevCurrentTime = engine.currentTime
+    var prevEdgeTime = engine.liveEdgeTime
+    // The fixture races well ahead of wall clock, so a single 1 s tick can
+    // legitimately advance the timeline by several seconds. A genuine
+    // unhandled +1000 s discontinuity dwarfs that; 100 s is a safe ceiling
+    // that no normal over-run reaches but any raw-PTS leap exceeds.
+    let leapCeiling: Double = 100.0
+
     let ticks = max(1, Int(playSeconds))
     for tick in 0..<ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         let elapsed = Date().timeIntervalSince(startTime)
-        print(String(format: "  state=%@ isLive=%@ t=%.2fs",
-                     "\(engine.state)", "\(engine.isLive)", engine.currentTime))
+        if checkMonotonic {
+            let ct = engine.currentTime
+            let et = engine.liveEdgeTime
+            // Backward jump on either axis is a hard violation.
+            if ct + 0.5 < prevCurrentTime || et + 0.5 < prevEdgeTime {
+                monotonicViolation = true
+                print(String(format: "  MONOTONIC VIOLATION (backward): "
+                             + "currentTime %.2f->%.2f edge %.2f->%.2f",
+                             prevCurrentTime, ct, prevEdgeTime, et))
+            }
+            // Forward leap by ~the raw PTS delta is the unhandled-jump
+            // signature.
+            let ctStep = ct - prevCurrentTime
+            let etStep = et - prevEdgeTime
+            maxForwardStep = max(maxForwardStep, max(ctStep, etStep))
+            if ctStep > leapCeiling || etStep > leapCeiling {
+                monotonicViolation = true
+                print(String(format: "  MONOTONIC VIOLATION (raw-PTS leap): "
+                             + "currentTime step=%.2f edge step=%.2f",
+                             ctStep, etStep))
+            }
+            prevCurrentTime = ct
+            prevEdgeTime = et
+        }
+        print(String(format: "  state=%@ isLive=%@ t=%.2fs edge=%.2fs",
+                     "\(engine.state)", "\(engine.isLive)", engine.currentTime, engine.liveEdgeTime))
         // Print RSS sample every 30 s when --measure-rss is set.
         if measureRSS && (elapsed - lastRSSTick >= 30.0 || tick == ticks - 1) {
             let phys = physFootprintBytes()
@@ -925,6 +970,7 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     let finalState = engine.state
     let finalIsLive = engine.isLive
     let finalTime = engine.currentTime
+    let finalEdge = engine.liveEdgeTime
     engine.stop()
 
     // Scale the "advanced past 15s" bar to the play window: a 20 s run
@@ -935,13 +981,30 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     let playing: Bool
     if case .playing = finalState { playing = true } else { playing = false }
 
-    if finalIsLive, playing, finalTime >= advanceTarget {
-        print(String(format: "VERDICT: live playing (isLive=%@, state=%@, t=%.2fs >= %.2fs)",
-                     "\(finalIsLive)", "\(finalState)", finalTime, advanceTarget))
+    // "Has the session advanced" is judged on currentTime when it ticks
+    // (native AVPlayer, and the SW path once its audio clock runs), else on
+    // the live edge (the SW video-only fixture advances the edge from video
+    // PTS while the audio-driven currentTime stays at 0). Either crossing the
+    // bar proves continued playback past the discontinuity point.
+    let advanced = max(finalTime, finalEdge)
+
+    if checkMonotonic && monotonicViolation {
+        print(String(format: "VERDICT: live FAIL (monotonic violation across "
+                     + "discontinuity; maxForwardStep=%.2fs, t=%.2fs, edge=%.2fs)",
+                     maxForwardStep, finalTime, finalEdge))
+        return 1
+    }
+
+    if finalIsLive, playing, advanced >= advanceTarget {
+        let mono = checkMonotonic
+            ? String(format: " monotonic OK maxStep=%.2fs", maxForwardStep)
+            : ""
+        print(String(format: "VERDICT: live playing (isLive=%@, state=%@, t=%.2fs, edge=%.2fs >= %.2fs)%@",
+                     "\(finalIsLive)", "\(finalState)", finalTime, finalEdge, advanceTarget, mono))
         return 0
     }
-    print(String(format: "VERDICT: live FAIL (isLive=%@, state=%@, t=%.2fs, needed t>=%.2fs)",
-                 "\(finalIsLive)", "\(finalState)", finalTime, advanceTarget))
+    print(String(format: "VERDICT: live FAIL (isLive=%@, state=%@, t=%.2fs, edge=%.2fs, needed >=%.2fs)",
+                 "\(finalIsLive)", "\(finalState)", finalTime, finalEdge, advanceTarget))
     return 1
 }
 
@@ -1187,13 +1250,19 @@ if first == "live" {
     // connection after N seconds, simulating a single recoverable mid-stream
     // drop. AVIOReader should reconnect and playback should resume.
     let dropAfter = takeDoubleFlag("--drop-after", from: &rest)
+    // --discontinuity-at N: after ~N seconds of serving, the fixture jumps
+    // its rewritten PTS / PCR forward by a large delta ONCE, then continues
+    // monotonically (simulating a program boundary). The engine must keep
+    // playing and keep the session timeline monotonic.
+    let discontinuityAt = takeDoubleFlag("--discontinuity-at", from: &rest)
     // --sliding is accepted-and-ignored for backward compat: sliding is now
     // the unconditional behaviour for a live session, so the flag is a no-op.
     _ = takeFlag("--sliding", from: &rest)
     exit(runLive(seconds: seconds, seed: seed, dvrWindow: dvrWindow,
                  serveOnly: serveOnly, measureRSS: measureRSS,
                  reportCacheBytes: reportCacheBytes, rewindTest: rewindTest,
-                 forceSoftware: forceSW, dropAfter: dropAfter))
+                 forceSoftware: forceSW, dropAfter: dropAfter,
+                 discontinuityAt: discontinuityAt))
 }
 
 // Subcommand path: explicit subcommand + flags + url.

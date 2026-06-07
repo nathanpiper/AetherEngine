@@ -38,6 +38,14 @@ protocol HLSSegmentProvider: AnyObject {
     /// returns the same value for every index in the audio case.
     func segmentDuration(at index: Int) -> Double
 
+    /// Whether segment `index` opens at a live PTS discontinuity (a
+    /// program boundary where the source clock leapt). When true the
+    /// playlist builder prefixes the segment's `#EXTINF` with
+    /// `#EXT-X-DISCONTINUITY`, which tells AVPlayer to keep its own
+    /// timeline continuous across the jump. Always false for VOD and the
+    /// audio-append path.
+    func segmentIsDiscontinuous(at index: Int) -> Bool
+
     /// Apple HLS playlist type. `.event` for live appended audio,
     /// `.vod` for the fully-known video case.
     var playlistType: HLSPlaylistType { get }
@@ -106,6 +114,10 @@ extension HLSSegmentProvider {
 
     /// Default: append-only / VOD playlists always start at segment 0.
     var firstVisibleSegmentIndex: Int { 0 }
+
+    /// Default: no discontinuities. Only the live video provider tracks
+    /// program-boundary segments; every other provider returns false.
+    func segmentIsDiscontinuous(at index: Int) -> Bool { false }
 
     var masterCodecs: String? { nil }
     var masterResolution: (width: Int, height: Int)? { nil }
@@ -1030,6 +1042,15 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         lines.append("#EXT-X-MAP:URI=\"\(initURI)\"")
         for i in firstVisible..<count {
+            // A segment that opened at a live program-boundary PTS jump is
+            // prefixed with #EXT-X-DISCONTINUITY (RFC 8216 §4.3.2.3): the tag
+            // applies to the segment that FOLLOWS it, so it goes immediately
+            // before that segment's #EXTINF. AVPlayer resets its media-
+            // sequence timeline at the tag, which keeps seekableEnd (and the
+            // engine's native session edge) monotonic across the source jump.
+            if provider.segmentIsDiscontinuous(at: i) {
+                lines.append("#EXT-X-DISCONTINUITY")
+            }
             let dur = provider.segmentDuration(at: i)
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append(segURI(i))

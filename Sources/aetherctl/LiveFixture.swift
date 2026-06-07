@@ -102,6 +102,27 @@ final class LiveFixture: @unchecked Sendable {
     /// is injected regardless of how many reconnects follow.
     private var didFireDrop = false
 
+    /// When non-nil, after this many seconds of serving the rewritten
+    /// PTS / DTS / PCR stream jumps FORWARD by `discontinuityJumpTicks`
+    /// ONCE, then continues monotonically from the jumped value. This
+    /// simulates a real broadcast program boundary where the source clock
+    /// leaps. The engine must survive it: native via #EXT-X-DISCONTINUITY,
+    /// SW via a running PTS offset that keeps the session timeline
+    /// continuous. Per-connection wall-clock relative to that connection's
+    /// first served packet.
+    var discontinuityAfterSeconds: Double? = nil
+    /// Size of the one-shot forward jump, in 90 kHz ticks. +1000 s default
+    /// (1000 * 90000), well beyond the discontinuity-detection threshold.
+    var discontinuityJumpTicks: Int64 = 1000 * 90_000
+    /// Latched true (by a timer scheduled at connection start) once the
+    /// discontinuity window has elapsed, so the serve loop starts adding
+    /// `discontinuityJumpTicks` to every subsequent packet. A timer-driven
+    /// flag (rather than an in-loop wall-clock check) so the jump fires on
+    /// schedule even while the serve loop is blocked on a back-pressured
+    /// `send`. Guarded by `stateLock`. Single-shot across the session.
+    private var discontinuityArmed = false
+    private var didFireDiscontinuity = false
+
     private let acceptQueue = DispatchQueue(
         label: "com.aetherengine.livefixture.accept",
         qos: .userInitiated
@@ -342,6 +363,37 @@ final class LiveFixture: @unchecked Sendable {
         var ccByPID: [Int: UInt8] = [:]
         var loopIndex: Int64 = 0
 
+        // One-shot program-boundary discontinuity. After `discontinuityAfter`
+        // seconds of serving, every subsequent packet's PTS / DTS / PCR gets
+        // an EXTRA forward jump of `discontinuityJumpTicks` added ON TOP of
+        // the normal per-loop offset. The jump is applied once and then held
+        // constant, so the stream continues monotonically from the jumped
+        // value (a real broadcast program switch). The continuity_counter is
+        // untouched, so the only anomaly the demuxer sees is the timestamp
+        // leap, which is exactly the case the engine must survive.
+        //
+        // Armed by a timer (like the drop path) so it fires on schedule even
+        // when the serve loop is parked in a back-pressured `send`.
+        stateLock.lock()
+        let discontinuityAfter = discontinuityAfterSeconds
+        let discontinuityJump = discontinuityJumpTicks
+        let scheduleDiscontinuity = (discontinuityAfter != nil && !didFireDiscontinuity)
+        stateLock.unlock()
+        if let after = discontinuityAfter, scheduleDiscontinuity {
+            workQueue.asyncAfter(deadline: .now() + after) { [weak self] in
+                guard let self else { return }
+                self.stateLock.lock()
+                if !self.didFireDiscontinuity {
+                    self.didFireDiscontinuity = true
+                    self.discontinuityArmed = true
+                    print("[LiveFixture] Arming one-shot PTS/PCR discontinuity "
+                          + "after ~\(Int(after))s (+\(discontinuityJump / 90_000)s jump)")
+                }
+                self.stateLock.unlock()
+            }
+        }
+        var discontinuityOffset: Int64 = 0
+
         // Reusable per-packet scratch buffer (188 bytes), rewritten in place
         // each iteration, so the serve loop allocates nothing steady-state.
         var scratch = [UInt8](repeating: 0, count: LiveFixture.tsPacketSize)
@@ -352,9 +404,23 @@ final class LiveFixture: @unchecked Sendable {
             stateLock.unlock()
             if stopping { return }
 
-            let tsOffset = loopIndex * loopPeriodTicks
-
             for packet in seedPackets {
+                // Poll the armed flag per packet (not just per seed-loop pass):
+                // the serve loop spends most of its time parked in a back-
+                // pressured `send` mid-pass, so an outer-loop-only check would
+                // not see the timer's arm until the next full pass, which can
+                // be many seconds late on a bursty reader.
+                if discontinuityOffset == 0 {
+                    stateLock.lock()
+                    let armed = discontinuityArmed
+                    stateLock.unlock()
+                    if armed {
+                        discontinuityOffset = discontinuityJump
+                        print("[LiveFixture] Injecting one-shot PTS/PCR discontinuity "
+                              + "(+\(discontinuityJump / 90_000)s jump, fd=\(fd))")
+                    }
+                }
+                let tsOffset = loopIndex * loopPeriodTicks &+ discontinuityOffset
                 packet.copyBytes(to: &scratch, count: LiveFixture.tsPacketSize)
                 rewritePacket(&scratch, tsOffset: tsOffset, ccByPID: &ccByPID)
                 if !writeAll(fd: fd, bytes: scratch) {

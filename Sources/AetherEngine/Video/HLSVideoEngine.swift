@@ -1005,10 +1005,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Live producer appends each finalized segment to the provider's
         // growing list so the live playlist exposes it on the next poll.
         if isLiveSession {
-            prod.onLiveSegmentFinalized = { [weak prov] index, durationSeconds, startPtsSeconds in
+            prod.onLiveSegmentFinalized = { [weak prov] index, durationSeconds, startPtsSeconds, discontinuous in
                 prov?.appendLiveSegment(index: index,
                                         startSeconds: startPtsSeconds,
-                                        durationSeconds: durationSeconds)
+                                        durationSeconds: durationSeconds,
+                                        discontinuous: discontinuous)
             }
         }
 
@@ -2466,6 +2467,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let endPts: Int64
         let startSeconds: Double
         let durationSeconds: Double
+        /// True when this segment opened at a detected live PTS
+        /// discontinuity (program boundary). The playlist builder prefixes
+        /// such a segment with `#EXT-X-DISCONTINUITY`. Always false for VOD
+        /// (the precomputed plan has no discontinuities).
+        var discontinuous: Bool = false
     }
 
 }
@@ -2693,7 +2699,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// index the producer assigned; appends are sequential so the list's
     /// position equals `index`. Defensive: an out-of-order or duplicate
     /// index is ignored so the list stays a dense `[0, n)`.
-    func appendLiveSegment(index: Int, startSeconds: Double, durationSeconds: Double) {
+    func appendLiveSegment(index: Int, startSeconds: Double, durationSeconds: Double,
+                           discontinuous: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard index == segments.count else {
@@ -2714,7 +2721,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
             startPts: startPts,
             endPts: endPts,
             startSeconds: startSeconds,
-            durationSeconds: durationSeconds
+            durationSeconds: durationSeconds,
+            discontinuous: discontinuous
         ))
     }
 
@@ -3070,6 +3078,17 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
         }
         guard index >= 0, index < segments.count else { return 0 }
         return segments[index].durationSeconds
+    }
+
+    func segmentIsDiscontinuous(at index: Int) -> Bool {
+        if isLive {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard index >= 0, index < segments.count else { return false }
+            return segments[index].discontinuous
+        }
+        guard index >= 0, index < segments.count else { return false }
+        return segments[index].discontinuous
     }
 
     /// Reverted to .vod after the sliding-window EVENT experiment:

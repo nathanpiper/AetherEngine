@@ -196,11 +196,47 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Fires once per finalized live segment (cut or EOF), off the pump
     /// thread, with the segment's absolute index, measured duration in
-    /// seconds, and start-PTS in seconds. The engine wires this to the
-    /// provider's `appendLiveSegment` so the growing EVENT playlist
-    /// exposes the segment on AVPlayer's next poll. Live-only; nil for
-    /// VOD.
-    var onLiveSegmentFinalized: (@Sendable (Int, Double, Double) -> Void)?
+    /// seconds, start-PTS in seconds, and a `discontinuous` flag (true when
+    /// the segment opened at a detected program-boundary PTS jump). The
+    /// engine wires this to the provider's `appendLiveSegment` so the
+    /// growing playlist exposes the segment, with `#EXT-X-DISCONTINUITY`
+    /// prefixed on the boundary segment. Live-only; nil for VOD.
+    var onLiveSegmentFinalized: (@Sendable (Int, Double, Double, Bool) -> Void)?
+
+    /// Live PTS-discontinuity detection. A real broadcast / IPTV feed can
+    /// cross a program boundary where the source PTS leaps (forward or
+    /// backward) well beyond normal frame spacing and codec params may
+    /// change. We track the previous video packet's RAW source PTS (before
+    /// any shift) and the per-frame spacing, and flag a discontinuity when
+    /// the next video packet's PTS deviates from the expected continuation
+    /// by more than `discontinuityThresholdSeconds`. This is DISTINCT from
+    /// the NOPTS-dts repair (which operates on dts at the +1-tick scale,
+    /// far below this threshold) and from the keyframe gate: it only fires
+    /// on a genuine multi-second leap.
+    ///
+    /// 10 s is the threshold: orders of magnitude above any frame interval
+    /// (≤ ~40 ms) or the look-behind duration inference, and well below the
+    /// synthetic +1000 s test jump, so it never trips on normal advance but
+    /// always catches a program boundary.
+    static let discontinuityThresholdSeconds: Double = 10.0
+
+    /// Previous video packet's RAW source PTS (source video TB), before the
+    /// dynamic shift is applied. `Int64.min` until the first post-gate video
+    /// packet. Used only in live mode to detect the program-boundary leap.
+    private var lastRawVideoPts: Int64 = Int64.min
+
+    /// When the live cutter next opens a segment, mark it discontinuous so
+    /// the playlist builder prefixes it with `#EXT-X-DISCONTINUITY`. Latched
+    /// on detection, consumed (cleared) when the next segment opens.
+    private var pendingDiscontinuityFlag: Bool = false
+
+    /// Per-index discontinuity flag for live segments the cutter has opened.
+    /// Mirrors `liveSegmentStartByIndex`'s lifetime: set when the segment
+    /// opens, read + removed when the segment is reported to the provider.
+    private var liveSegmentDiscontinuousByIndex: [Int: Bool] = [:]
+
+    /// One-shot log latch for the first detected discontinuity.
+    private var loggedFirstDiscontinuity: Bool = false
 
     /// Target segment duration in seconds. Passed to each per-segment
     /// MP4SegmentMuxer as the `frag_duration` defensive backstop;
@@ -568,6 +604,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             liveCurrentSegmentIndex = baseIndex
             liveSegmentStartPtsSeconds = ptsSeconds
             liveSegmentStartByIndex[liveCurrentSegmentIndex] = ptsSeconds
+            liveSegmentDiscontinuousByIndex[liveCurrentSegmentIndex] = false
             return liveCurrentSegmentIndex
         }
         if isKeyframe,
@@ -579,6 +616,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
             liveCurrentSegmentIndex += 1
             liveSegmentStartPtsSeconds = ptsSeconds
             liveSegmentStartByIndex[liveCurrentSegmentIndex] = ptsSeconds
+            // A discontinuity detected since the last cut marks THIS new
+            // segment as the boundary segment. AVPlayer keeps its own
+            // timeline continuous across the #EXT-X-DISCONTINUITY tag, which
+            // is what holds seekableEnd (and the engine's native session
+            // edge) monotonic across the jump. Consume the latch.
+            liveSegmentDiscontinuousByIndex[liveCurrentSegmentIndex] = pendingDiscontinuityFlag
+            pendingDiscontinuityFlag = false
         }
         return liveCurrentSegmentIndex
     }
@@ -764,13 +808,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         } else {
             duration = targetSegmentDurationSeconds
         }
+        let discontinuous = liveSegmentDiscontinuousByIndex[index] ?? false
         liveSegmentStartByIndex.removeValue(forKey: index)
+        liveSegmentDiscontinuousByIndex.removeValue(forKey: index)
         EngineLog.emit(
             "[HLSSegmentProducer] live seg-\(index) finalized: start=\(String(format: "%.3f", startSeconds))s "
-            + "dur=\(String(format: "%.3f", duration))s",
+            + "dur=\(String(format: "%.3f", duration))s"
+            + (discontinuous ? " [DISCONTINUITY]" : ""),
             category: .session
         )
-        onLiveSegmentFinalized?(index, duration, startSeconds)
+        onLiveSegmentFinalized?(index, duration, startSeconds, discontinuous)
     }
 
     /// Finalize the session-wide muxer at pump exit and adopt the
@@ -1326,6 +1373,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                         }
                     }
+                }
+
+                // Live PTS-discontinuity detection on RAW source video PTS
+                // (before the dynamic shift below mutates it). Only after the
+                // video gate has opened, and only in live mode. Compare the
+                // incoming raw pts against the previous video packet's raw
+                // pts: a leap (forward OR backward) larger than the threshold
+                // is a program boundary. This sits well above the NOPTS-dts
+                // repair scale (+1 tick) and any frame interval, so it does
+                // not interfere with either. The look-behind cut that opens
+                // the next segment consumes `pendingDiscontinuityFlag`.
+                if isVideoPkt, isLive, firstActualVideoDts != Int64.min,
+                   packet.pointee.pts != Int64.min {
+                    let rawPts = packet.pointee.pts
+                    if lastRawVideoPts != Int64.min {
+                        let deltaTicks = rawPts - lastRawVideoPts
+                        let deltaSeconds = Double(deltaTicks) * sourceVideoTbSeconds
+                        if abs(deltaSeconds) >= Self.discontinuityThresholdSeconds {
+                            pendingDiscontinuityFlag = true
+                            if !loggedFirstDiscontinuity {
+                                loggedFirstDiscontinuity = true
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] live PTS discontinuity detected: "
+                                    + "prevRawPts=\(lastRawVideoPts) rawPts=\(rawPts) "
+                                    + "delta=\(String(format: "%.2f", deltaSeconds))s "
+                                    + "(threshold=\(String(format: "%.1f", Self.discontinuityThresholdSeconds))s); "
+                                    + "next segment will carry #EXT-X-DISCONTINUITY",
+                                    category: .session
+                                )
+                            }
+                        }
+                    }
+                    lastRawVideoPts = rawPts
                 }
 
                 // Apply the per-stream dynamic shift. After both
