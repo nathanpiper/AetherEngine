@@ -12,6 +12,9 @@ extension AetherEngine {
     /// Recents-style callers that need frames from arbitrary items
     /// should construct `FrameExtractor(url:httpHeaders:)` directly.
     public func makeFrameExtractor() -> FrameExtractor? {
+        // A custom IOReader source has no URL to construct an extractor from
+        // (loadedURL is a synthetic placeholder); scrub preview is unavailable.
+        guard !isCustomSource else { return nil }
         guard let url = loadedURL else { return nil }
         return FrameExtractor(url: url, httpHeaders: loadedOptions.httpHeaders)
     }

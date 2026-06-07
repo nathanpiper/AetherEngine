@@ -323,6 +323,15 @@ public final class AetherEngine: ObservableObject {
     // AetherEngine+FrameExtractor extension to vend a FrameExtractor.
     private(set) var loadedURL: URL?
 
+    /// True when the active source is a custom `IOReader` (loaded via
+    /// `load(source: .custom(...))`). Such a source has no URL: `loadedURL`
+    /// holds a synthetic placeholder for bookkeeping only, so features that
+    /// reopen the source by URL (reload, audio-track switch, embedded
+    /// subtitles, FrameExtractor) must no-op instead of trying to reopen the
+    /// placeholder. See `load(source:)` docs for the limitation list.
+    /// Internal getter (read by the same-module FrameExtractor extension).
+    private(set) var isCustomSource = false
+
     /// Seconds the producer shifted AVPlayer's HLS clock away from
     /// source PTS on the native path: it subtracts `videoShiftPts` from
     /// every packet's pts/dts so seg-0's fragment tfdt aligns with the
@@ -754,8 +763,10 @@ public final class AetherEngine: ObservableObject {
         switch source {
         case .url(let u):
             url = u
+            isCustomSource = false
         case .custom:
             url = URL(string: "aether-custom://source")!
+            isCustomSource = true
         }
         loadedURL = url
         loadedOptions = options
@@ -1588,6 +1599,9 @@ public final class AetherEngine: ObservableObject {
     /// (where applicable) are invalidated by tvOS when the app is
     /// suspended.
     public func reloadAtCurrentPosition() async throws {
+        // Custom sources cannot be reopened by URL; no-op rather than
+        // tearing down a healthy session against the synthetic placeholder.
+        guard !isCustomSource else { return }
         guard let url = loadedURL else { return }
         let pos = currentTime
         try await load(url: url, startPosition: pos > 1 ? pos : nil, options: loadedOptions)
@@ -1751,6 +1765,9 @@ public final class AetherEngine: ObservableObject {
     /// index, an index pointing at a non-audio stream, or the index
     /// that's already active are no-ops.
     public func selectAudioTrack(index: Int) {
+        // Mid-playback audio switch reopens the source by URL, which a custom
+        // source cannot do. No-op so we don't stopInternal a healthy session.
+        guard !isCustomSource else { return }
         guard let url = loadedURL else { return }
         guard audioTracks.contains(where: { $0.id == index }) else {
             EngineLog.emit(
@@ -1947,6 +1964,9 @@ public final class AetherEngine: ObservableObject {
     /// re-seeks on `engine.seek` so scrubs surface cues at the new
     /// position immediately.
     public func selectSubtitleTrack(index: Int) {
+        // Embedded-subtitle selection opens a second side demuxer against the
+        // source URL; a single-cursor custom reader cannot serve it. No-op.
+        guard !isCustomSource else { return }
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
