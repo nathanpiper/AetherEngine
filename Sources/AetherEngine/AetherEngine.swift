@@ -748,15 +748,14 @@ public final class AetherEngine: ObservableObject {
     /// SEEK_SET/CUR/END) play on the software path only. A custom source
     /// whose initial probe fails throws, since it cannot be reopened by URL.
     ///
-    /// v1 limitations for custom sources. A custom source has no URL, so any
-    /// feature that reopens the source by URL is unavailable: mid-playback
-    /// audio-track switching (`selectAudioTrack`), background-return reload
-    /// (`reloadAtCurrentPosition`), embedded-subtitle selection (which opens
-    /// a second, concurrent side demuxer; a single-cursor reader cannot serve
-    /// both at once), and FrameExtractor scrub previews. These fall back to an
-    /// error or no-op rather than crashing. Plain start-to-finish playback,
-    /// seeking within a seekable reader, and external/sidecar subtitles are
-    /// unaffected.
+    /// Capability for custom sources. Seekable readers support audio-track
+    /// switching and background-return reload (the pipeline rebuilds on the
+    /// retained reader). Embedded-subtitle selection and FrameExtractor scrub
+    /// previews work when the reader implements `makeIndependentReader()` (they
+    /// run a second demuxer concurrently and need an independent cursor); they
+    /// no-op when it returns nil. Forward-only readers (seek returns negative)
+    /// cannot rewind or, typically, clone, so those features no-op for them.
+    /// Plain playback and sidecar subtitles always work.
     public func load(
         source: MediaSource,
         startPosition: Double? = nil,

@@ -143,7 +143,11 @@ try await engine.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
 
 > **Security.** On the native path, bytes supplied by a custom `IOReader` are re-muxed to cleartext fMP4 and served via the loopback HLS cache (disk + `127.0.0.1`) to AVPlayer. This is fine for encrypted-at-rest archives (the source is decrypted in memory, never written to disk in original form), but is a cleartext exposure if the source is encrypted for content protection.
 >
-> **Limitations.** Features that reopen the source by URL are unavailable for custom sources: mid-playback audio-track switching, background-return reload, embedded-subtitle selection, and `FrameExtractor` scrub previews. Plain playback, seeking within a seekable reader, and sidecar subtitles are unaffected.
+> **Capability:** seekable readers support audio-track switching and background
+> reload. Embedded subtitles and scrub-preview thumbnails require the reader to
+> implement `makeIndependentReader()` (a second independent cursor); they are
+> skipped when it is not implemented. Forward-only readers support plain
+> playback and seeking only.
 
 Install via Swift Package Manager:
 
