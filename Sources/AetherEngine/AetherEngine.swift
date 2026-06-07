@@ -1644,9 +1644,16 @@ public final class AetherEngine: ObservableObject {
     /// (where applicable) are invalidated by tvOS when the app is
     /// suspended.
     public func reloadAtCurrentPosition() async throws {
-        // Custom sources cannot be reopened by URL; no-op rather than
-        // tearing down a healthy session against the synthetic placeholder.
-        guard !isCustomSource else { return }
+        if isCustomSource {
+            // No URL to reopen; rebuild on the retained reader (seekable only),
+            // keeping the current audio track.
+            guard customSourceIsSeekable, let placeholderURL = loadedURL else { return }
+            await reloadWithAudioOverride(
+                url: placeholderURL,
+                audioStreamIndex: activeAudioTrackIndex.map { Int32($0) }
+            )
+            return
+        }
         guard let url = loadedURL else { return }
         let pos = currentTime
         try await load(url: url, startPosition: pos > 1 ? pos : nil, options: loadedOptions)
@@ -1810,9 +1817,9 @@ public final class AetherEngine: ObservableObject {
     /// index, an index pointing at a non-audio stream, or the index
     /// that's already active are no-ops.
     public func selectAudioTrack(index: Int) {
-        // Mid-playback audio switch reopens the source by URL, which a custom
-        // source cannot do. No-op so we don't stopInternal a healthy session.
-        guard !isCustomSource else { return }
+        // Custom sources rebuild on the retained reader; a forward-only reader
+        // cannot rewind, so it stays a no-op.
+        if isCustomSource && !customSourceIsSeekable { return }
         guard let url = loadedURL else { return }
         guard audioTracks.contains(where: { $0.id == index }) else {
             EngineLog.emit(
@@ -1842,11 +1849,15 @@ public final class AetherEngine: ObservableObject {
     /// pipeline reload. Cleared by `clearSubtitle` and `stopInternal`.
     private var loadedSidecarURL: URL?
 
-    /// Perform the audio-track-switch reload. Tears the current native
-    /// session down, brings a fresh `HLSVideoEngine` up with the new
-    /// audio source stream override, swaps AVPlayer to the new playlist
-    /// URL at the current playhead, and re-arms whichever subtitle
-    /// source was active when this task actually began executing.
+    /// Perform a pipeline rebuild at the current playhead. Tears the current
+    /// session down, brings a fresh pipeline up with an optional audio source
+    /// stream override (nil keeps the auto-picked track), resumes at the
+    /// current position, and re-arms whichever subtitle source was active when
+    /// this task actually began executing. Called by `selectAudioTrack` (with a
+    /// concrete index) and by `reloadAtCurrentPosition` for custom sources
+    /// (with nil to keep the current track). For custom sources the rebuild
+    /// reuses the retained `customReader` (see the `customPreopened` block);
+    /// for URL sources `loadSoftware`/`loadNative` reopen the URL.
     ///
     /// Subtitle and playhead state are snapshotted INSIDE the task body
     /// rather than at the call site, because hosts commonly chain a
@@ -1857,7 +1868,7 @@ public final class AetherEngine: ObservableObject {
     /// the post-reload state never actually re-armed.
     private func reloadWithAudioOverride(
         url: URL,
-        audioStreamIndex: Int32
+        audioStreamIndex: Int32?
     ) async {
         let resumeAt = currentTime
         let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
@@ -1902,10 +1913,33 @@ public final class AetherEngine: ObservableObject {
         // Keep the native AVPlayer host alive across the audio-track switch
         // (issue #15) unless playback is on the software path, where there
         // is no native host to preserve.
-        stopInternal(resetDisplayCriteria: false, keepNativeHost: !wasOnSoftwarePath)
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: !wasOnSoftwarePath, keepCustomReader: true)
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         loadedURL = url
         lastDetectedVideoCodec = preservedVideoCodec
+
+        // Custom sources have no URL to reopen; rebuild the pipeline on the
+        // retained reader. Build the demuxer off-main (find_stream_info
+        // blocks) and hand it through the existing preopenedDemuxer channel.
+        // The reader is seekable here (forward-only custom reload entry points
+        // no-op). The demuxer opens at byte 0; loadSoftware/loadNative then
+        // seek to the resume position via their startPosition argument.
+        var customPreopened: Demuxer? = nil
+        if isCustomSource, let reader = customReader {
+            let hint = customFormatHint
+            do {
+                customPreopened = try await Task.detached(priority: .userInitiated) {
+                    let d = Demuxer()
+                    try d.open(reader: reader, formatHint: hint)
+                    return d
+                }.value
+            } catch {
+                EngineLog.emit("[AetherEngine] reload: custom reader reopen failed: \(error)", category: .engine)
+                activeAudioTrackIndex = previousAudioIndex
+                state = .error("Reload failed: \(error.localizedDescription)")
+                return
+            }
+        }
 
         do {
             let loadStart = DispatchTime.now()
@@ -1916,16 +1950,16 @@ public final class AetherEngine: ObservableObject {
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
                     audioSourceStreamIndex: audioStreamIndex,
-                    preopenedDemuxer: nil
+                    preopenedDemuxer: customPreopened
                 )
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
-                activeAudioTrackIndex = Int(audioStreamIndex)
+                activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec, isSoftware: true
                 )
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
-                    audioTracks: audioTracks, activeIndex: audioStreamIndex
+                    audioTracks: audioTracks, activeIndex: audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
                 softwareHost?.play()
@@ -1939,11 +1973,12 @@ public final class AetherEngine: ObservableObject {
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
                     panelIsInHDRMode: loadedOptions.panelIsInHDRMode,
-                    audioBridgeMode: loadedOptions.audioBridgeMode
+                    audioBridgeMode: loadedOptions.audioBridgeMode,
+                    preopenedDemuxer: customPreopened
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
-                activeAudioTrackIndex = Int(audioStreamIndex)
+                activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec, isSoftware: false
                 )
