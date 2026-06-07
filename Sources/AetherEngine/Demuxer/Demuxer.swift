@@ -50,8 +50,9 @@ public final class Demuxer: @unchecked Sendable {
     /// that triggers assertion failures in matroskadec.c.
     private let accessLock = NSLock()
 
-    /// Retained while the format context is open for HTTP streams.
-    private var avioReader: AVIOReader?
+    /// Retained while the format context is open for AVIO-backed sources
+    /// (HTTP via AVIOReader, custom via CustomIOReaderBridge).
+    private var avioProvider: AVIOProvider?
 
     /// Profile supplied to the most recent `open` call. Governs probe
     /// budget in `applyProbeBudget` and (in a later task) AVIO tuning.
@@ -62,7 +63,7 @@ public final class Demuxer: @unchecked Sendable {
     /// network throughput against RSS growth. Zero for `file://`
     /// sources (no AVIOReader is involved).
     var avioBytesFetched: Int64 {
-        avioReader?.cumulativeBytesFetched ?? 0
+        avioProvider?.cumulativeBytesFetched ?? 0
     }
 
     /// Open a media URL and probe its streams.
@@ -105,39 +106,63 @@ public final class Demuxer: @unchecked Sendable {
         try probeStreams(openedCtx)
     }
 
+    /// Open a media source backed by a custom `IOReader` (memory buffer,
+    /// encrypted archive, etc.). `formatHint` (e.g. "mp4", "matroska")
+    /// disambiguates probing when no filename is available; pass nil to
+    /// probe from content only.
+    func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback) throws {
+        self.openProfile = profile
+        let bridge = CustomIOReaderBridge(reader: reader)
+        let inputFormat: UnsafePointer<AVInputFormat>? = formatHint.flatMap { av_find_input_format($0) }
+        try openWithProvider(bridge, inputFormat: inputFormat)
+    }
+
     /// Open an HTTP(S) URL via custom AVIO context + URLSession.
     private func openHTTP(url: URL, extraHeaders: [String: String]) throws {
-        // 1. Create and open the AVIO reader (performs HEAD request)
         let reader = AVIOReader(
             url: url,
             extraHeaders: extraHeaders,
             chunkSize: openProfile.avioChunkSize,
             prefetchEnabled: openProfile.avioPrefetch
         )
-        try reader.open()
-        avioReader = reader
+        try openWithProvider(reader)
+    }
 
-        // 2. Allocate an empty AVFormatContext and attach our AVIO
+    /// Shared open path for AVIO-backed sources. Opens the provider,
+    /// attaches its AVIOContext to a fresh AVFormatContext, then runs
+    /// avformat_open_input + the stream probe. `inputFormat` forces a
+    /// demuxer when non-nil (custom sources with a format hint).
+    private func openWithProvider(
+        _ provider: AVIOProvider,
+        inputFormat: UnsafePointer<AVInputFormat>? = nil
+    ) throws {
+        // 1. Open the provider (HEAD probe for HTTP, alloc context for custom).
+        try provider.open()
+        avioProvider = provider
+
+        // 2. Allocate an empty AVFormatContext and attach the provider's AVIO.
         guard let ctx = avformat_alloc_context() else {
+            avioProvider?.close()
+            avioProvider = nil
             throw DemuxerError.openFailed(code: -1)
         }
-        ctx.pointee.pb = reader.context
+        ctx.pointee.pb = provider.context
         applyProbeBudget(ctx)
         formatContext = ctx
 
-        // 3. Open input, pass nil for URL since pb is already set
+        // 3. Open input, URL is nil because pb is already set.
         var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
         var opts: OpaquePointer? = nil
         Self.applyDemuxerOptions(&opts)
-        let ret = avformat_open_input(&ctxPtr, nil, nil, &opts)
+        let ret = avformat_open_input(&ctxPtr, nil, inputFormat, &opts)
         av_dict_free(&opts)
         guard ret == 0 else {
             formatContext = nil
-            avioReader?.close()
-            avioReader = nil
+            avioProvider?.close()
+            avioProvider = nil
             throw DemuxerError.openFailed(code: ret)
         }
-        // avformat_open_input may reallocate, update our reference
+        // avformat_open_input may reallocate, update our reference.
         formatContext = ctxPtr
 
         try probeStreams(ctxPtr!)
@@ -518,7 +543,7 @@ public final class Demuxer: @unchecked Sendable {
         // 1. Mark AVIO as closed, read callback returns -1 immediately.
         //    This unblocks av_read_frame if the demux thread is suspended
         //    inside a read (tvOS suspends threads in background).
-        avioReader?.markClosed()
+        avioProvider?.markClosed()
 
         // 2. Wait for readPacket() to release the lock, then tear down.
         accessLock.lock()
@@ -528,8 +553,8 @@ public final class Demuxer: @unchecked Sendable {
         formatContext = nil
         accessLock.unlock()
 
-        avioReader?.close()
-        avioReader = nil
+        avioProvider?.close()
+        avioProvider = nil
     }
 
     deinit {
