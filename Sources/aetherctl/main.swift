@@ -49,6 +49,7 @@ private func printUsage() {
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio <url>
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N]
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -113,6 +114,16 @@ private func printUsage() {
                 OK if the clock advanced or FAIL if it stayed silent.
                 Smoke-tests the FFmpeg decode -> AVSampleBufferAudioRenderer
                 pipeline end-to-end on macOS without a display layer.
+
+      live      Start a synthetic endless MPEG-TS source (LiveFixture,
+                loopback HTTP, no Content-Length, monotonic PTS / PCR
+                across loop boundaries), load it with
+                LoadOptions(isLive: true), play for --seconds (default
+                20), and report whether isLive is true, state is
+                .playing, and currentTime advanced past ~15s. --seed
+                overrides the seed .ts (default
+                Fixtures/user/h264-ts-sample.ts). --dvr-window is parsed
+                but unused in this build (a later task wires it up).
     """)
 }
 
@@ -694,6 +705,132 @@ private func audioSmokeTest(url: URL, seconds playSeconds: Double) async -> Int3
     return 0
 }
 
+// MARK: - live
+
+/// Start a `LiveFixture` (endless MPEG-TS over loopback), load it into a
+/// fresh engine with `LoadOptions(isLive: true)`, play for `playSeconds`,
+/// and verdict on whether the live path advanced the clock.
+///
+/// `dvrWindow` is parsed from `--dvr-window` but unused in this task:
+/// `LoadOptions` does not yet have a `dvrWindowSeconds` property (a later
+/// task adds it). Accepted now so the flag is stable.
+private func runLive(seconds playSeconds: Double, seed seedPath: String?, dvrWindow: Double?, serveOnly: Bool) -> Int32 {
+    EngineLog.handler = { print($0) }
+
+    // Resolve the seed relative to the repo root (CWD under `swift run`).
+    let resolvedSeed = seedPath ?? "Fixtures/user/h264-ts-sample.ts"
+    print("aetherctl live: seed=\(resolvedSeed) seconds=\(playSeconds)" +
+          (dvrWindow.map { " dvr-window=\($0) (parsed, unused this task)" } ?? ""))
+
+    let fixture: LiveFixture
+    do {
+        fixture = try LiveFixture(seedPath: resolvedSeed)
+    } catch {
+        print("ERROR: \(error)")
+        return 1
+    }
+
+    let liveURL: URL
+    do {
+        liveURL = try fixture.start()
+    } catch {
+        print("ERROR: \(error)")
+        return 1
+    }
+    print("=== LIVE URL ===")
+    print(liveURL.absoluteString)
+    print("================")
+
+    // Diagnostic: park the fixture so curl / ffprobe can inspect the
+    // served endless stream directly, without the engine attached. Used
+    // to validate the fixture's TS rewrite in isolation.
+    //
+    //   curl -s http://127.0.0.1:<port>/live.ts | head -c 3000000 > /tmp/x.ts
+    //   ffprobe -v error -show_entries packet=pts -of csv /tmp/x.ts
+    if serveOnly {
+        print("Fixture parked (--serve-only). Ctrl-C to stop.")
+        signal(SIGINT, SIG_IGN)
+        let src = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        src.setEventHandler {
+            fixture.stop()
+            exit(0)
+        }
+        src.resume()
+        RunLoop.main.run()
+        return 0 // unreachable
+    }
+
+    let box = UncheckedBox<Int32?>(nil)
+    Task { @MainActor in
+        box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds)
+        fixture.stop()
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+    CFRunLoopRun()
+    return box.value ?? 1
+}
+
+@MainActor
+private func liveSmokeTest(url: URL, seconds playSeconds: Double) async -> Int32 {
+    let engine: AetherEngine
+    do {
+        engine = try AetherEngine()
+    } catch {
+        print("VERDICT: live FAIL: engine init error: \(error.localizedDescription)")
+        return 1
+    }
+
+    var options = LoadOptions(isLive: true)
+    options.suppressDisplayCriteria = true
+
+    do {
+        try await engine.load(url: url, options: options)
+    } catch {
+        // The native HLS path (H.264 / HEVC) currently requires a finite
+        // duration to build its segment plan, so an unbounded live source
+        // throws `zeroDuration` here. That unbounded-duration segment
+        // producer is what the later plan tasks add; this harness reaching
+        // a load failure on the fixture is the expected pre-feature state,
+        // not a fixture defect (the fixture serves a valid, continuous TS,
+        // verifiable with `aetherctl live --serve-only` + ffprobe).
+        print("VERDICT: live FAIL: load error: \(error.localizedDescription)")
+        engine.stop()
+        return 1
+    }
+
+    print(String(format: "  post-load state=%@ isLive=%@ t=%.2fs",
+                 "\(engine.state)", "\(engine.isLive)", engine.currentTime))
+
+    let ticks = max(1, Int(playSeconds))
+    for _ in 0..<ticks {
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        print(String(format: "  state=%@ isLive=%@ t=%.2fs",
+                     "\(engine.state)", "\(engine.isLive)", engine.currentTime))
+    }
+
+    let finalState = engine.state
+    let finalIsLive = engine.isLive
+    let finalTime = engine.currentTime
+    engine.stop()
+
+    // Scale the "advanced past 15s" bar to the play window: a 20 s run
+    // should clear ~15 s, a shorter run scales proportionally (minus a
+    // small warm-up allowance for first-segment latency).
+    let advanceTarget = playSeconds >= 20 ? 15.0 : max(1.0, playSeconds * 0.6)
+
+    let playing: Bool
+    if case .playing = finalState { playing = true } else { playing = false }
+
+    if finalIsLive, playing, finalTime >= advanceTarget {
+        print(String(format: "VERDICT: live playing (isLive=%@, state=%@, t=%.2fs >= %.2fs)",
+                     "\(finalIsLive)", "\(finalState)", finalTime, advanceTarget))
+        return 0
+    }
+    print(String(format: "VERDICT: live FAIL (isLive=%@, state=%@, t=%.2fs, needed t>=%.2fs)",
+                 "\(finalIsLive)", "\(finalState)", finalTime, advanceTarget))
+    return 1
+}
+
 // MARK: - extract
 
 /// Drive an async actor call to completion from the synchronous CLI.
@@ -809,6 +946,16 @@ private func takeIntFlag(_ name: String, from rest: inout [String]) -> Int? {
 }
 
 /// Pluck a `--key value` pair out of the rest-args list, returning
+/// the value as String. Returns nil if absent or value-less.
+private func takeStringFlag(_ name: String, from rest: inout [String]) -> String? {
+    guard let idx = rest.firstIndex(of: name),
+          idx + 1 < rest.count else { return nil }
+    let value = rest[idx + 1]
+    rest.removeSubrange(idx...(idx + 1))
+    return value
+}
+
+/// Pluck a `--key value` pair out of the rest-args list, returning
 /// the value as Double. Returns nil if absent or unparseable.
 private func takeDoubleFlag(_ name: String, from rest: inout [String]) -> Double? {
     guard let idx = rest.firstIndex(of: name),
@@ -816,6 +963,16 @@ private func takeDoubleFlag(_ name: String, from rest: inout [String]) -> Double
           let value = Double(rest[idx + 1]) else { return nil }
     rest.removeSubrange(idx...(idx + 1))
     return value
+}
+
+// Live subcommand: no URL positional (the fixture supplies its own URL).
+if first == "live" {
+    var rest = Array(args.dropFirst(2))
+    let seconds = takeDoubleFlag("--seconds", from: &rest) ?? 20.0
+    let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
+    let seed = takeStringFlag("--seed", from: &rest)
+    let serveOnly = takeFlag("--serve-only", from: &rest)
+    exit(runLive(seconds: seconds, seed: seed, dvrWindow: dvrWindow, serveOnly: serveOnly))
 }
 
 // Subcommand path: explicit subcommand + flags + url.
