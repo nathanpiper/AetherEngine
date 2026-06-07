@@ -48,6 +48,7 @@ private func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio <url>
+      aetherctl customio [--memory] [--forward-only] <file>
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -366,6 +367,180 @@ private func runSWDecode(url: URL, maxPackets: Int) -> Int32 {
     return 0
 }
 
+// MARK: - customio
+
+/// A minimal `IOReader` over a local file, used to prove the custom-source
+/// load path. `forwardOnly` simulates a non-seekable source by refusing
+/// SEEK_SET/CUR/END (AVSEEK_SIZE still answers, so probing can size the file).
+/// `inMemory` loads the whole file into a Data buffer instead of streaming
+/// from the FileHandle.
+final class FileHandleIOReader: IOReader, @unchecked Sendable {
+    private let data: Data?
+    private let handle: FileHandle?
+    private let totalSize: Int64
+    private var position: Int64 = 0
+    private let forwardOnly: Bool
+    private let lock = NSLock()
+
+    init(path: String, inMemory: Bool, forwardOnly: Bool) throws {
+        self.forwardOnly = forwardOnly
+        let attrs = try FileManager.default.attributesOfItem(atPath: path)
+        self.totalSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        if inMemory {
+            self.data = try Data(contentsOf: URL(fileURLWithPath: path))
+            self.handle = nil
+        } else {
+            guard let h = FileHandle(forReadingAtPath: path) else {
+                throw NSError(domain: "aetherctl", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "cannot open \(path)"])
+            }
+            self.data = nil
+            self.handle = h
+        }
+    }
+
+    func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+        guard let buffer = buffer, size > 0 else { return -1 }
+        lock.lock(); defer { lock.unlock() }
+        let want = Int(size)
+        guard position >= 0 else { return -1 }
+        let chunk: Data
+        if let data = data {
+            let start = Int(position)
+            if start >= data.count { return 0 } // EOF
+            let end = min(start + want, data.count)
+            chunk = data.subdata(in: start..<end)
+        } else if let handle = handle {
+            handle.seek(toFileOffset: UInt64(position))
+            chunk = handle.readData(ofLength: want)
+            if chunk.isEmpty { return 0 } // EOF
+        } else {
+            return -1
+        }
+        chunk.copyBytes(to: buffer, count: chunk.count)
+        position += Int64(chunk.count)
+        return Int32(chunk.count)
+    }
+
+    /// FFmpeg AVSEEK_SIZE: a query for total size, not a reposition.
+    private static let avSeekSize: Int32 = 0x10000
+
+    func seek(offset: Int64, whence: Int32) -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        // AVSEEK_SIZE: query total size only, no reposition. Always answerable.
+        if whence == Self.avSeekSize { return totalSize }
+        if forwardOnly { return -1 }
+        switch whence {
+        case 0: position = max(0, offset)              // SEEK_SET
+        case 1: position = max(0, position + offset)   // SEEK_CUR
+        case 2: position = max(0, totalSize + offset)  // SEEK_END
+        default: return -1
+        }
+        return position
+    }
+
+    func close() {
+        try? handle?.close()
+    }
+}
+
+/// Load media through the engine's custom IOReader source path and play
+/// it, printing the engine state once a second. Confirms load(source:)
+/// end-to-end on both the native path (seekable reader) and the software
+/// path (seekable or forward-only).
+private func runCustomIO(path: String, inMemory: Bool, forwardOnly: Bool) -> Int32 {
+    let modeDesc: String
+    switch (inMemory, forwardOnly) {
+    case (true, true):   modeDesc = "in-memory + forward-only"
+    case (true, false):  modeDesc = "in-memory"
+    case (false, true):  modeDesc = "forward-only streaming file"
+    case (false, false): modeDesc = "seekable file"
+    }
+    print("aetherctl customio: \(path) (\(modeDesc))")
+    let box = UncheckedBox<Int32?>(nil)
+    Task { @MainActor in
+        box.value = await customIOSmokeTest(path: path, inMemory: inMemory, forwardOnly: forwardOnly)
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+    CFRunLoopRun()
+    return box.value ?? 1
+}
+
+@MainActor
+private func customIOSmokeTest(path: String, inMemory: Bool, forwardOnly: Bool) async -> Int32 {
+    let reader: FileHandleIOReader
+    do {
+        reader = try FileHandleIOReader(path: path, inMemory: inMemory, forwardOnly: forwardOnly)
+    } catch {
+        print("VERDICT: custom source failed: reader init error: \(error.localizedDescription)")
+        return 1
+    }
+
+    let engine: AetherEngine
+    do {
+        engine = try AetherEngine()
+    } catch {
+        print("VERDICT: custom source failed: engine init error: \(error.localizedDescription)")
+        return 1
+    }
+
+    var options = LoadOptions()
+    options.suppressDisplayCriteria = true
+
+    do {
+        try await engine.load(source: .custom(reader), options: options)
+    } catch {
+        print("VERDICT: custom source failed: load error: \(error.localizedDescription)")
+        return 1
+    }
+
+    // Check state immediately after load returns (load is async and sets
+    // state to .playing before returning on both the native and software
+    // paths). A short file may complete and reset to .idle before the
+    // first poll tick, so capture the post-load snapshot immediately.
+    let postLoadState = engine.state
+    let postLoadTime = engine.currentTime
+    print(String(format: "  post-load state=%@ t=%.2fs dur=%.2fs",
+                 "\(postLoadState)", postLoadTime, engine.duration))
+    if case .playing = postLoadState {
+        let verdict = String(format: "VERDICT: custom source playing. currentTime=%.2fs", postLoadTime)
+        print(verdict)
+        engine.stop()
+        return 0
+    }
+    if case .error(let msg) = postLoadState {
+        print("VERDICT: custom source failed: \(msg)")
+        engine.stop()
+        return 1
+    }
+    // State was .idle or .loading at load return; poll for up to 8s.
+    let maxTicks = 8
+    for _ in 0..<maxTicks {
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let t = engine.currentTime
+        let st = engine.state
+        print(String(format: "  state=%@ t=%.2fs", "\(st)", t))
+        switch st {
+        case .playing:
+            let verdict = String(format: "VERDICT: custom source playing. currentTime=%.2fs", t)
+            print(verdict)
+            engine.stop()
+            return 0
+        case .error(let msg):
+            print("VERDICT: custom source failed: \(msg)")
+            engine.stop()
+            return 1
+        default:
+            break
+        }
+    }
+    let finalTime = engine.currentTime
+    let finalState = engine.state
+    print("VERDICT: custom source timed out after \(maxTicks)s (state=\(finalState), t=\(String(format: "%.2f", finalTime))s)")
+    engine.stop()
+    return 1
+}
+
 // MARK: - audio
 
 /// Load a source through the engine's audio-only path and play it,
@@ -566,7 +741,7 @@ private func takeDoubleFlag(_ name: String, from rest: inout [String]) -> Double
 }
 
 // Subcommand path: explicit subcommand + flags + url.
-if ["probe", "serve", "validate", "swdecode", "extract", "audio"].contains(first) {
+if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
     var rest = Array(args.dropFirst(2))
     let noDV = takeFlag("--no-dv", from: &rest)
     let framesOverride = takeIntFlag("--frames", from: &rest)
@@ -574,6 +749,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio"].contains(first
     let extractLoops = takeIntFlag("--loops", from: &rest) ?? 1
     let extractWidth = takeIntFlag("--width", from: &rest) ?? 320
     let snapshotMode = takeFlag("--snapshot", from: &rest)
+    let inMemory = takeFlag("--memory", from: &rest)
+    let forwardOnly = takeFlag("--forward-only", from: &rest)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
         print("")
@@ -601,6 +778,9 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio"].contains(first
         ))
     case "audio":
         exit(runAudio(url: url, seconds: 10))
+    case "customio":
+        // urlArg is a filesystem path, not a URL; use rest.first directly.
+        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly))
     default:
         printUsage()
         exit(64)
