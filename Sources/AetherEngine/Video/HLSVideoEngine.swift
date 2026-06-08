@@ -858,13 +858,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             } else if compat != .unsupported {
+                // ADTS-AAC from MPEG-TS carries no AudioSpecificConfig in
+                // extradata, so the fMP4 mp4a/esds sample entry can't be built
+                // and the mux write_header fails (EINVAL → "Could not find tag
+                // for codec aac"), forcing the lossy FLAC bridge. Synthesise the
+                // ASC into the codecpar (and clear the TS codec_tag) so stream-
+                // copy works; the pump then strips the per-frame ADTS header.
+                let stripAdts = Self.prepareAACForFMP4(audioStream.pointee.codecpar)
+                if stripAdts {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] audio: AAC/ADTS from TS — synthesised ASC + stripping ADTS for fMP4 stream-copy (no FLAC bridge)",
+                        category: .session
+                    )
+                }
                 streamCopyAudio = HLSSegmentProducer.AudioConfig(
                     codecpar: audioStream.pointee.codecpar,
                     timeBase: audioStream.pointee.time_base,
                     sourceStreamIndex: audioStreamIndex,
                     inputTimeBase: audioStream.pointee.time_base,
                     sourceTimeBase: audioStream.pointee.time_base,
-                    bridge: nil
+                    bridge: nil,
+                    stripAacAdts: stripAdts
                 )
                 // Compute the audio per-frame fallback duration in
                 // the source audio time_base. Same need as
@@ -1499,6 +1513,46 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if !alreadyFired {
             onFirstHDR10PlusDetected?()
         }
+    }
+
+    /// AAC carried as ADTS (the typical MPEG-TS shape) arrives with no
+    /// AudioSpecificConfig in `extradata`, so the fMP4 `mp4a`/`esds` sample
+    /// entry can't be written and the mux fails. Synthesise a 2-byte ASC from
+    /// the codecpar's sample rate / channel count and install it as extradata,
+    /// and clear the codec_tag the mpegts demuxer leaves (the mov muxer rejects
+    /// the TS tag). Returns true when it applied the fix — the caller flags the
+    /// pump to strip the per-frame ADTS header. No-op (false) for non-AAC or
+    /// AAC that already carries an ASC (then the existing copy path works).
+    private static func prepareAACForFMP4(
+        _ codecpar: UnsafeMutablePointer<AVCodecParameters>
+    ) -> Bool {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_AAC else { return false }
+        guard codecpar.pointee.extradata == nil || codecpar.pointee.extradata_size == 0 else { return false }
+        let freqTable: [Int32] = [96000, 88200, 64000, 48000, 44100, 32000,
+                                  24000, 22050, 16000, 12000, 11025, 8000, 7350]
+        guard let freqIdx = freqTable.firstIndex(of: codecpar.pointee.sample_rate) else { return false }
+        let channels = max(1, Int(codecpar.pointee.ch_layout.nb_channels))
+        let chanConfig = channels <= 7 ? channels : 2
+        // audioObjectType: basic AAC profiles map profile→profile+1 (LC = 2);
+        // default to 2 (AAC-LC, the mp4a.40.2 the engine advertises) otherwise.
+        let profile = Int(codecpar.pointee.profile)
+        let aot = (profile >= 0 && profile <= 3) ? profile + 1 : 2
+        let asc: [UInt8] = [
+            UInt8((aot << 3) | (freqIdx >> 1)),
+            UInt8(((freqIdx & 1) << 7) | (chanConfig << 3)),
+        ]
+        if codecpar.pointee.extradata != nil { av_freep(&codecpar.pointee.extradata) }
+        codecpar.pointee.extradata_size = 0
+        let total = asc.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)
+        guard let buf = av_malloc(total)?.assumingMemoryBound(to: UInt8.self) else { return false }
+        asc.withUnsafeBufferPointer { src in
+            if let base = src.baseAddress { memcpy(buf, base, asc.count) }
+        }
+        memset(buf + asc.count, 0, Int(AV_INPUT_BUFFER_PADDING_SIZE))
+        codecpar.pointee.extradata = buf
+        codecpar.pointee.extradata_size = Int32(asc.count)
+        codecpar.pointee.codec_tag = 0
+        return true
     }
 
     /// Try the stream-copy → FLAC-bridge → video-only cascade for the

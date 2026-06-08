@@ -126,6 +126,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// and muxes the returned FLAC packets; nil means the source
         /// packet is muxed directly (stream-copy).
         let bridge: AudioBridge?
+        /// True when the source is AAC carried as ADTS (the typical shape
+        /// out of an MPEG-TS feed: no AudioSpecificConfig in `extradata`,
+        /// a 7/9-byte ADTS header on every frame). To stream-copy that into
+        /// fMP4 the pump must strip the ADTS header from each packet; the
+        /// engine separately synthesises the ASC into the muxer codecpar so
+        /// the `mp4a`/`esds` sample entry is well-formed. Without this the
+        /// mux write_header fails (EINVAL) and the channel falls back to the
+        /// lossy FLAC bridge. Only set for the stream-copy AAC path.
+        let stripAacAdts: Bool
+
+        init(codecpar: UnsafePointer<AVCodecParameters>,
+             timeBase: AVRational,
+             sourceStreamIndex: Int32,
+             inputTimeBase: AVRational,
+             sourceTimeBase: AVRational,
+             bridge: AudioBridge?,
+             stripAacAdts: Bool = false) {
+            self.codecpar = codecpar
+            self.timeBase = timeBase
+            self.sourceStreamIndex = sourceStreamIndex
+            self.inputTimeBase = inputTimeBase
+            self.sourceTimeBase = sourceTimeBase
+            self.bridge = bridge
+            self.stripAacAdts = stripAacAdts
+        }
     }
 
     // MARK: - State
@@ -1538,6 +1563,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         }
                         continue
                     }
+                    // ADTS-AAC from MPEG-TS: strip the per-frame ADTS header
+                    // so the bytes muxed into fMP4 are raw AAC (the sample
+                    // entry's esds/ASC was synthesised at setup). Done in place
+                    // before the look-behind stashes the packet.
+                    if audio.stripAacAdts { Self.stripADTSHeader(packet) }
                     // Stream-copy audio look-behind.
                     let thisAudioSeg: Int = isLive ? liveCurrentSegmentIndex : 0
                     if let prev = pendingAudioPkt {
@@ -1678,6 +1708,26 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         trackedPacketFree(&pkt)
+    }
+
+    /// Strip a single ADTS header off an AAC packet in place so the bytes
+    /// are raw AAC, suitable for the fMP4 `mp4a` sample entry. ADTS frames
+    /// carry a 7-byte header (or 9 with a CRC, flagged by the
+    /// `protection_absent` bit), then the raw AAC payload. We advance the
+    /// packet's `data` pointer past the header and shrink `size`; the packet's
+    /// `buf` (what `av_packet_unref` frees) is untouched, so this is safe.
+    /// No-ops unless the packet actually starts with the 0xFFF ADTS sync,
+    /// which guards against double-stripping or a source that already emits
+    /// raw AAC. Assumes one raw-data-block per ADTS frame (the universal case
+    /// for streamed AAC); multi-block ADTS is not split here.
+    private static func stripADTSHeader(_ packet: UnsafeMutablePointer<AVPacket>) {
+        guard let data = packet.pointee.data, packet.pointee.size >= 7 else { return }
+        // Sync word: 12 bits of 1s (0xFFF) → data[0]==0xFF, top 4 bits of data[1] set.
+        guard data[0] == 0xFF, (data[1] & 0xF0) == 0xF0 else { return }
+        let headerLen: Int32 = (data[1] & 0x01) != 0 ? 7 : 9
+        guard packet.pointee.size > headerLen else { return }
+        packet.pointee.data = data.advanced(by: Int(headerLen))
+        packet.pointee.size -= headerLen
     }
 
     /// Same shape as `finalizeAndWriteVideo` but for stream-copy
