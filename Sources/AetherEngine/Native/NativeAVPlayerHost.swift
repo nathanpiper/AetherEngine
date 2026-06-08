@@ -117,7 +117,7 @@ final class NativeAVPlayerHost {
     /// `DisplayCriteriaController.apply(...)` must have been invoked
     /// upstream so AVKit can configure the HDR pipeline against the
     /// right target mode before the first segment is fetched.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false) {
         unloadCurrentItem()
 
         Self.nextSessionID += 1
@@ -502,7 +502,13 @@ final class NativeAVPlayerHost {
         // hint but isn't enough on its own — AVPlayer treats EVENT
         // playlists as "start near the live edge" unless the caller
         // explicitly seeks first.
-        seek(to: startPosition ?? 0)
+        //
+        // Live remote-HLS (nativeRemoteHLS) WANTS AVPlayer's natural live-
+        // edge start, so it sets skipInitialSeek and we leave the position
+        // to AVPlayer. VOD / loopback (default) seeks to startPosition.
+        if !skipInitialSeek {
+            seek(to: startPosition ?? 0)
+        }
     }
 
     /// Release the AVPlayerItem so a follow-up `load(...)` starts

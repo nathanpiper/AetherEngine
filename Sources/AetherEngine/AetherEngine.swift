@@ -825,7 +825,16 @@ public final class AetherEngine: ObservableObject {
         loadedURL = url
         loadedOptions = options
         isLive = options.isLive
-        liveWindow = options.isLive ? LiveWindow(windowSeconds: options.dvrWindowSeconds) : nil
+        // Native remote-HLS has no engine-managed DVR window; the rewind
+        // range is whatever the remote HLS playlist exposes. Give the live
+        // window an unbounded rewind bound so the engine's live seek isn't a
+        // no-op; the host's `avPlayer.seek` clamps to AVPlayer's real
+        // seekable range, so an over-wide bound only affects the published
+        // range's width, not where a seek actually lands. VOD/loopback live
+        // keeps its disk-backed `dvrWindowSeconds`.
+        liveWindow = options.isLive
+            ? LiveWindow(windowSeconds: options.nativeRemoteHLS ? .greatestFiniteMagnitude : options.dvrWindowSeconds)
+            : nil
         state = .loading
         currentTime = 0
         nativeClockSeconds = 0
@@ -835,6 +844,17 @@ public final class AetherEngine: ObservableObject {
         subtitleTracks = []
         metadata = nil
         subtitleCueDiagnosticCount = 0
+
+        // Native remote-HLS live path: skip the probe + loopback pipeline
+        // entirely and play the URL directly with AVPlayer. The source
+        // server (Jellyfin) already exposes HLS; AVPlayer manages the live
+        // edge, buffering, and reconnect natively. Routed before the probe
+        // because we never demux the m3u8 ourselves (unlike the audioOnly
+        // divert below, which needs probe info first).
+        if options.nativeRemoteHLS {
+            try await loadRemoteHLS(url: url, options: options)
+            return
+        }
 
         // 1. Brief demuxer probe to grab format + frame rate + track
         //    metadata. The HLSVideoEngine spun up below re-opens
@@ -1219,6 +1239,93 @@ public final class AetherEngine: ObservableObject {
     /// auto-picked audio stream when non-nil; used by the mid-playback
     /// audio-track-switch path so the new pipeline picks up the host's
     /// chosen language without a separate API entry point.
+    /// Lean native-HLS live path: build an `AVPlayerItem` from the remote
+    /// URL on the (reused) `NativeAVPlayerHost` and wire its @Published
+    /// mirrors into the engine surface. No Demuxer, no HLSVideoEngine, no
+    /// producer, no loopback server, no display-criteria handshake (AVKit
+    /// drives match-content for the AVPlayerViewController). The live-window
+    /// surfaces are published off `host.seekableEnd`, which reflects the
+    /// remote HLS playlist's seekable range. Mirrors `loadNative`'s host +
+    /// publisher wiring, minus everything loopback-specific.
+    private func loadRemoteHLS(url: URL, options: LoadOptions) async throws {
+        playbackBackend = .native
+
+        let host: NativeAVPlayerHost
+        if let existing = nativeHost {
+            host = existing
+        } else {
+            host = NativeAVPlayerHost()
+        }
+        host.playerLayer.videoGravity = _videoGravity
+        if !pendingExternalMetadata.isEmpty {
+            host.setExternalMetadata(pendingExternalMetadata)
+        }
+        self.nativeHost = host
+        // No producer on this path, so the playhead carries the AVPlayer
+        // clock directly (no source-PTS fold). Keep the shift at 0.
+        self.playlistShiftSeconds = 0
+        if currentAVPlayer !== host.avPlayer {
+            self.currentAVPlayer = host.avPlayer
+        }
+
+        nativeCancellables.removeAll()
+        host.$currentTime
+            .sink { [weak self] value in
+                guard let self = self else { return }
+                self.nativeClockSeconds = value
+                self.currentTime = value
+                self.sourceTime = value
+                if self.isLive {
+                    self.publishLiveWindow(edgeSessionTime: host.seekableEnd)
+                }
+            }
+            .store(in: &nativeCancellables)
+        host.$duration
+            .sink { [weak self] value in
+                if value > 0 { self?.duration = value }
+            }
+            .store(in: &nativeCancellables)
+        host.$isReady
+            .sink { [weak self] ready in
+                guard let self = self else { return }
+                if ready, self.state == .loading {
+                    self.state = .paused
+                }
+            }
+            .store(in: &nativeCancellables)
+        host.$failureMessage
+            .compactMap { $0 }
+            .sink { [weak self] msg in self?.state = .error(msg) }
+            .store(in: &nativeCancellables)
+        host.$didReachEnd
+            .filter { $0 }
+            .sink { [weak self] _ in self?.state = .idle }
+            .store(in: &nativeCancellables)
+        host.$timeControlStatus
+            .sink { [weak self] status in
+                guard let self = self else { return }
+                guard self.state == .playing || self.state == .paused else { return }
+                switch status {
+                case .paused:
+                    if self.state != .paused { self.state = .paused }
+                case .playing, .waitingToPlayAtSpecifiedRate:
+                    if self.state != .playing { self.state = .playing }
+                @unknown default:
+                    break
+                }
+            }
+            .store(in: &nativeCancellables)
+
+        // Start at AVPlayer's natural live edge (skipInitialSeek). AVPlayer
+        // hits the remote server directly here (not the loopback); the
+        // Jellyfin HLS URL carries its own auth (ApiKey / PlaySessionId /
+        // LiveStreamId) as query params, so no extra HTTP headers are needed.
+        host.load(url: url,
+                  startPosition: nil,
+                  perFrameHDR: true,
+                  skipInitialSeek: true)
+    }
+
     private func loadNative(
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
