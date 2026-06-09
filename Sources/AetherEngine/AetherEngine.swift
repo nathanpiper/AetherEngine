@@ -1542,9 +1542,25 @@ public final class AetherEngine: ObservableObject {
         // also true (so setting it true explicitly is a no-op against
         // an unset property anyway; we keep the explicit write so
         // diagnostics surface the live value).
+        // Live loopback gets a deep forward buffer (8 s), VOD keeps the 4 s
+        // default. At live startup the manifest is held until
+        // liveStartupSegments (~2 x 4 s = 8 s) exist, so 8 s of content is
+        // already cut and sitting on the loopback server when AVPlayer
+        // connects. A 4 s forward buffer leaves AVPlayer with only one
+        // segment of lead, so the one-time transcode warm-up gap (the next
+        // segment arriving ~1 s late while the server ramps to steady
+        // throughput) drains the buffer and produces a brief rebuffer. An
+        // 8 s buffer lets AVPlayer pull both already-available segments up
+        // front and ride past the warm-up gap with margin. Critically this
+        // costs nothing at startup: the loopback server delivers locally and
+        // instantly, so pulling 8 s is sub-millisecond (unlike the bandwidth-
+        // limited remote path, where a 4 s floor caused a 3-4 s black screen,
+        // see NativeAVPlayerHost.load). It adds only a fixed ~4 s-of-bitrate
+        // to resident memory, not to the per-session retention growth rate.
         host.load(url: playbackURL,
                   startPosition: startPosition,
-                  perFrameHDR: true)
+                  perFrameHDR: true,
+                  forwardBufferDuration: isLive ? 8.0 : 4.0)
     }
 
     /// Open a `SoftwarePlaybackHost` against the source and wire its

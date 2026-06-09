@@ -131,18 +131,24 @@ final class NativeAVPlayerHost {
         // Forward-buffer floor before AVPlayer leaves
         // `waitingToPlayAtSpecifiedRate` and starts rendering.
         //
-        // VOD/loopback default (4 s): matches the loopback HLS segment
-        // cadence, enough to ride out a normal segment-generation hiccup
-        // from the local producer without ballooning resident memory.
+        // VOD default (4 s): matches the loopback HLS segment cadence,
+        // enough to ride out a normal segment-generation hiccup from the
+        // local producer without ballooning resident memory.
         //
-        // Live native-HLS passes 0 (system adaptive). Against a remote
-        // Jellyfin live transcode the 4 s floor forced AVPlayer to pull
-        // ~4 s (~10 MB at 20 Mbps) before unblocking — a 3-4 s black
-        // screen at startup while the server transcoded + shipped that
-        // buffer. 0 hands buffering back to AVPlayer's own heuristic,
-        // which starts as soon as it has a playable lead. preferredForward-
-        // BufferDuration == 0.0 is the documented "let the player choose"
-        // value.
+        // Live loopback passes 8 s (caller-supplied). The loopback server
+        // delivers locally and instantly, so a deep forward buffer is free
+        // at startup (no black screen) and lets AVPlayer pull both
+        // already-cut startup segments up front to ride past the transcode
+        // warm-up gap. See the call site in AetherEngine.loadNative.
+        //
+        // Live remote-HLS (loadRemoteHLS) passes 0 (system adaptive).
+        // Against a remote, bandwidth-limited Jellyfin live transcode the
+        // 4 s floor forced AVPlayer to pull ~4 s (~10 MB at 20 Mbps) before
+        // unblocking — a 3-4 s black screen at startup while the server
+        // transcoded + shipped that buffer. 0 hands buffering back to
+        // AVPlayer's own heuristic, which starts as soon as it has a
+        // playable lead. preferredForwardBufferDuration == 0.0 is the
+        // documented "let the player choose" value.
         item.preferredForwardBufferDuration = forwardBufferDuration
 
         // Forward per-frame HDR metadata (HDR10+ ST 2094-40 and Dolby
