@@ -819,7 +819,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
-            EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (retryAfter=\(retryAfter)s)", category: .demux)
+            EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(unproductiveReconnects) retryAfter=\(retryAfter)s)", category: .demux)
             backoffBeforeReconnect(streak: unproductiveReconnects, retryAfter: retryAfter)
             startPersistentConnection(at: frontier)
         }
@@ -864,8 +864,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             unproductiveReconnects += 1
         }
         bytesAtLastReconnect = now
-        return unproductiveReconnects > Self.reconnectMaxUnproductive
+        // A source that has NEVER delivered a single byte is dead-on-arrival
+        // (hard HTTP 5xx on a live tuner, wrong URL), not a flaky-but-alive
+        // link; the full 13-attempt budget kept such opens grinding for
+        // minutes (and, before the probe-abort hook, into the next
+        // sessions). Give those up after a handful of attempts. Anything
+        // that ever produced data keeps the full progress-aware budget so
+        // mid-stream resilience is unchanged.
+        let cap = now == 0
+            ? Self.reconnectMaxUnproductiveNeverProductive
+            : Self.reconnectMaxUnproductive
+        return unproductiveReconnects > cap
     }
+
+    /// Reconnect budget for a connection that has never delivered any data
+    /// (see `recordReconnectAndShouldGiveUp`). 4 attempts ride out a
+    /// transient transcode spin-up hiccup (~10-15 s with backoff) without
+    /// grinding a dead tuner for minutes.
+    private static let reconnectMaxUnproductiveNeverProductive = 4
 
     /// Sleep before a reconnect. A productive reconnect (streak 0) retries
     /// immediately so a single clean drop doesn't stall playback; the delay

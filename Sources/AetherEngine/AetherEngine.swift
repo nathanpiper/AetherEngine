@@ -492,6 +492,13 @@ public final class AetherEngine: ObservableObject {
     /// demuxer probe. Reset to `AV_CODEC_ID_NONE` in `stopInternal`.
     private var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
 
+    /// Probe demuxer of the CURRENTLY RUNNING load(), registered before the
+    /// (detached, potentially minutes-blocking) open and cleared when load()
+    /// exits. stopInternal marks it closed so player dismissal / channel
+    /// zapping aborts a probe stuck in the AVIOReader reconnect loop
+    /// instead of letting it reconnect into the next session.
+    private var inFlightProbeDemuxer: Demuxer?
+
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
     /// session gets a fresh budget.
@@ -904,6 +911,20 @@ public final class AetherEngine: ObservableObject {
         var probedSubtitleTracks: [TrackInfo] = []
         var probedDefaultAudioIndex: Int32 = -1
         let probe = Demuxer()
+        // Register the in-flight probe so stopInternal can abort it. The
+        // probe's avformat_open_input / find_stream_info can block for the
+        // AVIOReader's full reconnect budget against a dead live source
+        // (e.g. a tuner answering HTTP 500); without this, dismissing the
+        // player or zapping channels left the probe reconnecting in the
+        // background THROUGH the next sessions until the budget ran out
+        // (device repro: a 500-looping channel kept reconnecting across
+        // three subsequent channel sessions). markClosed() is lock-free and
+        // makes the blocked open return promptly.
+        inFlightProbeDemuxer = probe
+        // Identity-guarded: a superseding load() (channel zap mid-probe) has
+        // already registered ITS probe by the time this one unwinds; an
+        // unconditional nil here would strip the successor's abort handle.
+        defer { if inFlightProbeDemuxer === probe { inFlightProbeDemuxer = nil } }
         var probeOpened = false
         do {
             // Detach the HTTP probe + avformat_open_input + avformat_find_stream_info
@@ -2883,6 +2904,10 @@ public final class AetherEngine: ObservableObject {
         // currentAVPlayer sink to see a nil publish).
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
+        // Abort a probe blocked in open/find_stream_info (see
+        // `inFlightProbeDemuxer`). Lock-free + idempotent; the owning
+        // load() unwinds with openFailed and clears the reference.
+        inFlightProbeDemuxer?.markClosed()
         liveTelemetrySampler?.stop()
         liveTelemetrySampler = nil
         liveTelemetry = nil
