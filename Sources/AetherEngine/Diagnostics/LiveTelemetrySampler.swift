@@ -40,8 +40,8 @@ struct RollingWindow<T: AdditiveArithmetic> {
     }
 }
 
-/// Drives the engine's `liveTelemetry` `@Published` value at 1 Hz while
-/// the engine is `.playing` or `.paused`. Owns no playback state; reads
+/// Drives `engine.diagnostics.liveTelemetry` at 1 Hz while the engine
+/// is `.playing` or `.paused`. Owns no playback state; reads
 /// from the engine's existing subsystem counters once per tick and
 /// assembles a `LiveTelemetry` snapshot.
 ///

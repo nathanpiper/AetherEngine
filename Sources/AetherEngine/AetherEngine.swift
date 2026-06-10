@@ -118,11 +118,21 @@ public final class AetherEngine: ObservableObject {
     /// hosts should not switch on it.
     @Published public private(set) var playbackBackend: PlaybackBackend = .none
 
+    /// Timer-sampled diagnostics (`liveTelemetry`, 1 Hz). Deliberately
+    /// a SEPARATE ObservableObject for the same reason as `clock`: a
+    /// once-per-second sample must not fire `objectWillChange` on the
+    /// engine itself, or every engine-observing SwiftUI view re-renders
+    /// per sample for the whole session (AetherEngine#29 follow-up).
+    /// Observe `diagnostics` only in stats overlays; see
+    /// `EngineDiagnostics` for the usage guide.
+    public let diagnostics = EngineDiagnostics()
+
     /// 1 Hz snapshot of live playback telemetry while the engine is
-    /// `.playing` or `.paused`. `nil` while idle. Driven by
-    /// `LiveTelemetrySampler`. The host's stats overlay subscribes to
-    /// this and renders into the Live + Engine Diagnostics sections.
-    @Published public private(set) var liveTelemetry: LiveTelemetry?
+    /// `.playing` or `.paused`. `nil` while idle. Read-only convenience
+    /// forwarder for polling; for push updates subscribe to
+    /// `diagnostics.$liveTelemetry` (the engine's `objectWillChange`
+    /// does NOT fire on telemetry samples).
+    public var liveTelemetry: LiveTelemetry? { diagnostics.liveTelemetry }
 
     /// Human-readable identity of the video decoder currently in use,
     /// suitable for a "stats for nerds" UI. Examples:
@@ -2828,11 +2838,11 @@ public final class AetherEngine: ObservableObject {
             try checkLoadCurrent(gen)
             state = .playing
             // Re-arm the diagnostic samplers. stopInternal nilled the
-            // sampler instance + the published liveTelemetry value, and
-            // the reload path bypasses the public load() that would
-            // otherwise restart them — so without this, the host's
-            // stats overlay sees @Published liveTelemetry stuck at nil
-            // and renders "-" for every field after the first audio
+            // sampler instance + diagnostics.liveTelemetry, and the
+            // reload path bypasses the public load() that would
+            // otherwise restart them, so without this the host's
+            // stats overlay sees liveTelemetry stuck at nil and
+            // renders "-" for every field after the first audio
             // track switch in a session.
             startMemoryProbe()
             startLiveTelemetrySampler()
@@ -3421,7 +3431,7 @@ public final class AetherEngine: ObservableObject {
         inFlightProbeDemuxer?.markClosed()
         liveTelemetrySampler?.stop()
         liveTelemetrySampler = nil
-        liveTelemetry = nil
+        diagnostics.liveTelemetry = nil
         nativeCancellables.removeAll()
         nativeHost?.tearDown()
         if !keepNativeHost {
@@ -3707,11 +3717,11 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Live telemetry bridge
 
-    /// Apply a fresh `LiveTelemetry` snapshot to the `@Published` mirror.
-    /// Internal so `LiveTelemetrySampler` can write through despite the
-    /// `private(set)` on `liveTelemetry` from the public API surface.
+    /// Apply a fresh `LiveTelemetry` snapshot to the `@Published` mirror
+    /// on `diagnostics`. Kept as the single write-through point so the
+    /// sampler does not reach into `EngineDiagnostics` directly.
     func applyLiveTelemetry(_ snapshot: LiveTelemetry) {
-        liveTelemetry = snapshot
+        diagnostics.liveTelemetry = snapshot
     }
 
 
