@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-06-10
+
+### Fixed
+
+- **Persistent-reader window no longer leaks its backing storage.** The sliding window trimmed consumed bytes with `Data.removeFirst`, which only advances the slice's lower bound: the backing allocation kept growing with every byte ever streamed through the connection (~14 MB/s on an 80 Mbps remux) while the window's logical size held at ~20 MB, until jetsam killed the app on large files. The trim now re-bases the window into fresh compact storage; a 512 MB standalone repro went from +513 MB footprint to +9 MB flat. Same pattern fixed in the sequential streaming reader. Second half of #31 (the first half, subtitle side-demuxer pacing, shipped in 3.0.0).
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.0.1))
+
 ## [3.0.0] — 2026-06-10
 
 ### Breaking
