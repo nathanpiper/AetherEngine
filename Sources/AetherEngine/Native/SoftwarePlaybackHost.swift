@@ -573,6 +573,15 @@ final class SoftwarePlaybackHost {
             // up and trips err=-12080 from FigVideoQueueRemote.
             audioOutput?.seekClock(to: targetTime, rate: lastRate)
             isPlaying = true
+        } else {
+            // Paused seek: anchor the clock at the target with rate 0 so
+            // the eventual play() resumes from the SEEK position. Without
+            // this, play()'s synchronizer resume continued from the stale
+            // pre-seek clock: a forward scrub froze the frame for the
+            // scrubbed span of wall time, a backward scrub made every
+            // sample 'late' and the renderer dropped everything.
+            audioOutput?.seekClock(to: targetTime, rate: 0)
+            pausedByHost = true
         }
     }
 
@@ -606,12 +615,17 @@ final class SoftwarePlaybackHost {
 
         // Anchor the master clock at the target so the post-skip samples
         // (which carry source PTS >= targetSource) align with the clock.
+        // Paused DVR scrubs anchor at rate 0 so the resume continues from
+        // the scrub position (see the VOD seek path for the rationale).
         if wasPlaying {
             audioOutput?.seekClock(to: targetTime, rate: lastRate)
-            // The clock is positioned; the feeder must not re-arm it at
-            // the (earlier) anchor keyframe's PTS.
-            clockArmed = true
+        } else {
+            audioOutput?.seekClock(to: targetTime, rate: 0)
+            pausedByHost = true
         }
+        // The clock is positioned either way; the feeder must not re-arm
+        // it at the (earlier) anchor keyframe's PTS.
+        clockArmed = true
 
         // Reposition the feeder cursor onto the newest keyframe at or
         // before the target (clamped to the oldest retained packet, which

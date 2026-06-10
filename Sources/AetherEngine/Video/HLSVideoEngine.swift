@@ -3298,6 +3298,23 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
         // re-fetch of a recently-played segment) don't justify
         // tearing down the producer.
         if previousTarget >= 0, index < previousTarget - 2, let restart = restartHandler {
+            // Cache gate: only relocate when the requested segment is NOT
+            // resident. The cache's backwardWindow (20 segments) was sized
+            // so AVPlayer's Continuous-Audio handover refetches (~7-10
+            // segments backward) serve from cache WITHOUT a producer
+            // restart, because each restart re-arms the FLAC bridge
+            // timeline and produced audible glitches. The unconditional
+            // proactive restart reintroduced exactly that teardown for
+            // resident-window refetches; the back-scrub hang it was added
+            // for involves a segment the window already pruned, which
+            // still restarts below.
+            if cache.peekURL(index: index) != nil {
+                EngineLog.emit(
+                    "[HLSVideoEngine] declareTarget backward jump \(previousTarget) -> \(index): resident in cache, no restart",
+                    category: .session
+                )
+                return
+            }
             EngineLog.emit(
                 "[HLSVideoEngine] declareTarget backward jump \(previousTarget) → \(index), proactively restarting producer",
                 category: .session

@@ -1016,7 +1016,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         generation: Int
     ) -> Bool {
         let status = http.statusCode
-        let isOK = status == 200 || status == 206
+        var isOK = status == 200 || status == 206
         var retryAfter: TimeInterval = 0
         if status == 429 || status == 503 {
             retryAfter = Self.parseRetryAfter(http)
@@ -1026,7 +1026,25 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             connStatus = status
             connRetryAfter = retryAfter
         }
+        // VOD only: a 200 for a connection opened at offset > 0 means
+        // the server ignored the Range header and is sending the full
+        // body from byte 0; the window would label those bytes at
+        // `winStart = offset` and feed FFmpeg data from the wrong file
+        // position (silent corruption). Reject the body; the
+        // reconnect/backoff machinery turns this into an honest failure
+        // instead. LIVE is exempt: a live transcode reconnect at the
+        // frontier legitimately answers 200 with the stream "from now",
+        // the byte offset is synthetic there and continuation-by-time
+        // is exactly what the live window models.
+        let requestedOffset = (generation == connGeneration) ? winStart : 0
         winCond.unlock()
+        if status == 200 && requestedOffset > 0 && !isLive {
+            EngineLog.emit(
+                "[AVIOReader] server ignored Range (200 for offset \(requestedOffset)); rejecting body",
+                category: .demux
+            )
+            isOK = false
+        }
 
         if isOK {
             if let resolvedURL { recordResolvedURL(resolvedURL) }
@@ -1390,6 +1408,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         if usingCachedURL && Self.isResolvedExpiryStatus(status) {
                             invalidateResolvedURL()
                         }
+                        return nil
+                    }
+                    // VOD only: a 200 for a Range request at offset > 0
+                    // means the server ignored Range and sent the FULL
+                    // body from byte 0; storing it labeled at `offset`
+                    // would feed FFmpeg bytes from the wrong file
+                    // position (silent stream corruption). Reject; an
+                    // honest failure beats corrupt media. (Live never
+                    // uses the chunked path, but keep the guard
+                    // consistent with the persistent one.)
+                    if status == 200 && offset > 0 && !isLive {
+                        EngineLog.emit(
+                            "[AVIOReader] server ignored Range (200 for offset \(offset)); rejecting chunk",
+                            category: .demux
+                        )
                         return nil
                     }
                 }

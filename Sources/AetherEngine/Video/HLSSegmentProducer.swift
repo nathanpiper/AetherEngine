@@ -786,11 +786,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func segmentIndex(forSourcePts pts: Int64) -> Int {
         guard !segmentBoundaries.isEmpty else { return baseIndex }
+        // Callers pass POST-shift (output-timeline) values: the
+        // look-behind stashes packets after the dynamic shift was
+        // applied, and the bridge re-stamps onto the shifted timeline.
+        // The plan boundaries are ABSOLUTE source PTS, so fold the
+        // shift back before comparing; the two axes only coincided when
+        // the source's first keyframe sat at pts 0 (the dominant case,
+        // which is why the skew went unnoticed). With a non-zero start
+        // or a restart whose gate landed past the planned target, every
+        // boundary crossing was detected late by that offset and cut
+        // content drifted from the declared EXTINFs.
+        let absolute = videoShiftPts == Int64.min ? pts : pts &+ videoShiftPts
         // Linear scan is fine here — segmentBoundaries is at most
         // ~2k entries and this is called once per video packet on a
         // worker queue. Binary search would be premature.
         for i in 0..<(segmentBoundaries.count - 1) {
-            if pts < segmentBoundaries[i + 1] {
+            if absolute < segmentBoundaries[i + 1] {
                 return baseIndex + i
             }
         }
@@ -918,10 +929,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                            nextIndex: newIdx)
             }
         } else {
+            // A failed fragment cut leaves the muxer WITHOUT an open
+            // staging fd: the splitter callback then silently discards
+            // every subsequent fragment byte while the pump keeps
+            // burning network + CPU producing nothing (AVPlayer starves
+            // into per-segment fetch timeouts). The muxer cannot recover
+            // mid-session (the avformat context's fragment state is
+            // tied to the lost fd), so treat the cut failure as fatal:
+            // returning nil makes the pump exit with .muxerFailed, and
+            // a live session takes the engine's reopen path with a
+            // fresh producer + muxer.
             EngineLog.emit(
-                "[HLSSegmentProducer] seg-\(currentMuxerSegmentIndex).m4s cut failed; not adopted",
+                "[HLSSegmentProducer] seg-\(currentMuxerSegmentIndex).m4s cut FAILED; "
+                + "muxer is wedged, ending pump",
                 category: .session
             )
+            return nil
         }
         currentMuxerSegmentIndex = newIdx
 
@@ -2105,6 +2128,34 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 trackedPacketFree(&pkt)
             }
             pendingAudioPkt = nil
+        }
+
+        // EOF tail flush for bridged audio: emit the decoder/FIFO/encoder
+        // remainder (~100-200 ms) that the per-feed drain never produces
+        // (it only emits FULL encoder frames). Without this the final
+        // moments of audio of every bridged VOD title were dropped. Only
+        // on a clean EOF; stop/error paths skip it.
+        if case .eof = exitReason, let audio = audioConfig, let bridge = audio.bridge {
+            for fp in bridge.flush() {
+                let fpSeg: Int
+                if isLive {
+                    fpSeg = liveCurrentSegmentIndex
+                } else {
+                    let fpPtsInVideoTb = av_rescale_q(
+                        fp.pointee.pts,
+                        audio.inputTimeBase,
+                        sourceVideoTimeBase
+                    )
+                    fpSeg = segmentIndex(forSourcePts: fpPtsInVideoTb)
+                }
+                if let muxer = ensureMuxer(forSegmentIndex: fpSeg) {
+                    fp.pointee.stream_index = muxer.audioOutputStreamIndex
+                    av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+                    _ = muxer.writePacket(fp)
+                }
+                var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+                trackedPacketFree(&fpVar)
+            }
         }
 
         // Finalize the session-wide muxer's final segment so its

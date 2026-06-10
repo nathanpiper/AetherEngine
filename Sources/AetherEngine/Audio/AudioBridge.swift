@@ -502,6 +502,19 @@ final class AudioBridge: @unchecked Sendable {
         if let f = fifo {
             av_audio_fifo_reset(f)
         }
+        // Drop the decoder's reference frames and the resampler's delay
+        // buffer too: after a backward scrub they still hold
+        // pre-restart samples that would otherwise bleed a few ms of
+        // old-position audio into the new position (and a stale decoder
+        // frame could surface as garbage content on the rebased
+        // timeline). swr_init on a configured context re-initializes it
+        // in place, clearing the fractional-delay state.
+        if let dec = decoderCtx {
+            avcodec_flush_buffers(dec)
+        }
+        if let swr = swrCtx {
+            _ = swr_init(swr)
+        }
         rebaseFromNextSourcePTS = true
     }
 
@@ -517,6 +530,55 @@ final class AudioBridge: @unchecked Sendable {
     /// Called on the pump thread, same thread as `feed`. Samples still
     /// sitting in the FIFO (< one encoder frame) are stamped post-jump;
     /// that error is bounded by one frame (~32 ms) and one-shot.
+    /// Drain everything still buffered in the bridge at source EOF:
+    /// remaining decoder frames, the FIFO leftover (< one encoder
+    /// frame), and the encoder's internal delay. Without this the
+    /// final ~100-200 ms of audio of every VOD title were silently
+    /// dropped (the FIFO drain in `feed` only emits FULL encoder
+    /// frames, and nothing ever sent the encoder its EOF frame).
+    /// Returns the final encoded packets; the caller writes them via
+    /// the same muxer path as `feed` output. Call once, at pump EOF,
+    /// before muxer finalize. Not meaningful for live (no EOF).
+    func flush() -> [UnsafeMutablePointer<AVPacket>] {
+        guard let dec = decoderCtx, let enc = encoderCtx,
+              let swr = swrCtx, let fifoPtr = fifo else { return [] }
+        var results: [UnsafeMutablePointer<AVPacket>] = []
+
+        // 1. Drain the decoder's internal delay.
+        _ = avcodec_send_packet(dec, nil)
+        var srcFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        defer { av_frame_free(&srcFrame) }
+        if let sf = srcFrame {
+            while avcodec_receive_frame(dec, sf) >= 0 {
+                try? resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)
+            }
+        }
+
+        // 2. Encode the FIFO remainder, including the final partial
+        //    frame (requireFull: false pads/short-frames it).
+        try? drainFIFOIntoEncoder(enc: enc, fifo: fifoPtr, requireFull: false, results: &results)
+
+        // 3. Flush the encoder's internal delay.
+        _ = avcodec_send_frame(enc, nil)
+        while true {
+            guard let outPkt = trackedPacketAlloc() else { break }
+            let recvRet = avcodec_receive_packet(enc, outPkt)
+            guard recvRet >= 0 else {
+                var p: UnsafeMutablePointer<AVPacket>? = outPkt
+                trackedPacketFree(&p)
+                break
+            }
+            results.append(outPkt)
+        }
+        if !results.isEmpty {
+            EngineLog.emit(
+                "[AudioBridge] EOF flush emitted \(results.count) tail packet(s)",
+                category: .session
+            )
+        }
+        return results
+    }
+
     func noteTimelineJump(deltaSeconds: Double) {
         guard deltaSeconds > 0, encoderTimeBase.den > 0 else { return }
         let samples = Int64((deltaSeconds * Double(encoderTimeBase.den)).rounded())
