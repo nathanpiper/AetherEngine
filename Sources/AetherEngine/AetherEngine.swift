@@ -606,9 +606,14 @@ public final class AetherEngine: ObservableObject {
 
     /// Source video dimensions captured at `load()` probe time. The
     /// embedded subtitle decoder uses these as a canvas-size fallback
-    /// when a bitmap codec's PCS hasn't been parsed yet.
-    private var sourceVideoWidth: Int32 = 0
-    private var sourceVideoHeight: Int32 = 0
+    /// when a bitmap codec's PCS hasn't been parsed yet. Public
+    /// read-only for hosts that size their UI from the source frame
+    /// (AetherEngine#28); 0 before the first load or when the source
+    /// has no video track. `load(source:)` also returns the full
+    /// `SourceProbe`, which carries the same dimensions plus the rest
+    /// of the probe metadata in one shot.
+    public private(set) var sourceVideoWidth: Int32 = 0
+    public private(set) var sourceVideoHeight: Int32 = 0
 
     /// Last-detected source video codec id. Latched in `load(url:)` and
     /// reused by the audio-track-switch reload path so it can re-derive
@@ -735,10 +740,49 @@ public final class AetherEngine: ObservableObject {
         url: URL,
         options: LoadOptions = .init()
     ) throws -> SourceProbe {
-        let demuxer = Demuxer()
-        try demuxer.open(url: url, extraHeaders: options.httpHeaders)
-        defer { demuxer.close() }
+        try probe(source: .url(url), options: options)
+    }
 
+    /// `probe(url:)` for a custom byte source (AetherEngine#27). Same
+    /// one-shot metadata read, but against a caller-supplied
+    /// `IOReader` instead of a URL.
+    ///
+    /// Reader contract: the caller retains ownership. The probe seeks
+    /// and reads through the reader for libavformat's stream-info
+    /// pass and leaves the cursor at an unspecified position; it does
+    /// NOT call `close()`. Hand the engine a fresh reader (or one you
+    /// rewind yourself) when you `load(source:)` afterwards. For the
+    /// `.url` case this is exactly `probe(url:)`.
+    ///
+    /// `SourceProbe.url` echoes the probed URL for `.url` sources and
+    /// the synthetic `aether-custom://source` for custom readers
+    /// (mirroring what `load(source:)` publishes as `loadedURL`).
+    public nonisolated static func probe(
+        source: MediaSource,
+        options: LoadOptions = .init()
+    ) throws -> SourceProbe {
+        let demuxer = Demuxer()
+        let displayURL: URL
+        switch source {
+        case .url(let u):
+            try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+            displayURL = u
+        case .custom(let reader, let formatHint):
+            try demuxer.open(reader: reader, formatHint: formatHint)
+            displayURL = URL(string: "aether-custom://source")!
+        }
+        defer { demuxer.close() }
+        return makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
+    }
+
+    /// Assemble a `SourceProbe` from an open demuxer. Shared by the
+    /// static probe entry points and `load(source:)`'s internal probe
+    /// stage, so all of them report identical metadata for the same
+    /// source.
+    private nonisolated static func makeSourceProbe(
+        demuxer: Demuxer,
+        displayURL: URL
+    ) -> SourceProbe {
         var detectedFormat: VideoFormat = .sdr
         var detectedRate: Double? = nil
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
@@ -762,13 +806,14 @@ public final class AetherEngine: ObservableObject {
         // Live-stream hint: duration absent + network-feed URL scheme.
         // Heuristic only; hosts decide whether to flip
         // LoadOptions.isLive based on this plus their own context
-        // (e.g. an IPTV catalog entry vs a movie file).
+        // (e.g. an IPTV catalog entry vs a movie file). Custom readers
+        // (synthetic aether-custom:// scheme) never match.
         let liveSchemes: Set<String> = ["http", "https", "udp", "rtp", "rtsp"]
         let isLive = duration <= 0
-            && liveSchemes.contains(url.scheme?.lowercased() ?? "")
+            && liveSchemes.contains(displayURL.scheme?.lowercased() ?? "")
 
         return SourceProbe(
-            url: url,
+            url: displayURL,
             durationSeconds: duration,
             videoFormat: detectedFormat,
             videoCodecID: Int32(bitPattern: detectedCodecID.rawValue),
@@ -955,12 +1000,13 @@ public final class AetherEngine: ObservableObject {
     ///     Validated against the container; an invalid index falls back
     ///     to the auto pick.
     /// Load media from a URL. Convenience wrapper over `load(source:)`.
+    @discardableResult
     public func load(
         url: URL,
         startPosition: Double? = nil,
         options: LoadOptions = .init(),
         audioSourceStreamIndex: Int32? = nil
-    ) async throws {
+    ) async throws -> SourceProbe? {
         try await load(
             source: .url(url),
             startPosition: startPosition,
@@ -984,12 +1030,20 @@ public final class AetherEngine: ObservableObject {
     /// no-op when it returns nil. Forward-only readers (seek returns negative)
     /// cannot rewind or, typically, clone, so those features no-op for them.
     /// Plain playback and sidecar subtitles always work.
+    ///
+    /// Returns the `SourceProbe` assembled from the internal probe
+    /// stage (video size, codec, tracks, metadata) so hosts get the
+    /// source facts without a second probe round-trip
+    /// (AetherEngine#28). nil on the `nativeRemoteHLS` bypass (no
+    /// probe runs there) and when the probe failed but playback
+    /// proceeds anyway (URL sources can be reopened internally).
+    @discardableResult
     public func load(
         source: MediaSource,
         startPosition: Double? = nil,
         options: LoadOptions = .init(),
         audioSourceStreamIndex: Int32? = nil
-    ) async throws {
+    ) async throws -> SourceProbe? {
         // Preserve the native AVPlayer host across a native->native reload
         // so AVKit's system Now-Playing registration survives the seam
         // (issue #15). Captured before stopInternal resets playbackBackend.
@@ -1048,7 +1102,8 @@ public final class AetherEngine: ObservableObject {
         // divert below, which needs probe info first).
         if options.nativeRemoteHLS {
             try await loadRemoteHLS(url: url, options: options)
-            return
+            // No probe ran on this bypass; there is nothing to report.
+            return nil
         }
 
         // 1. Brief demuxer probe to grab format + frame rate + track
@@ -1181,6 +1236,13 @@ public final class AetherEngine: ObservableObject {
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         metadata = probeOpened ? probe.mediaMetadata() : nil
+        // Assemble the caller-facing SourceProbe now, while the probe
+        // demuxer is open: ownership transfers to loadNative /
+        // loadSoftware further down, after which the streams are gone
+        // (AetherEngine#28).
+        let sourceProbe: SourceProbe? = probeOpened
+            ? Self.makeSourceProbe(demuxer: probe, displayURL: url)
+            : nil
         // Mirror the audio stream HLSVideoEngine will actually pick.
         // When the host passed an override, that takes precedence; if
         // the override is invalid we fall back to the auto pick to
@@ -1256,7 +1318,7 @@ public final class AetherEngine: ObservableObject {
                 state = .error("Failed to load: \(error.localizedDescription)")
                 throw error
             }
-            return
+            return sourceProbe
         }
 
         // 2. Display-criteria handshake. Drive from the effective format so
@@ -1483,6 +1545,7 @@ public final class AetherEngine: ObservableObject {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
         }
+        return sourceProbe
     }
 
     /// Open HLSVideoEngine against the source, wire NativeAVPlayerHost

@@ -156,6 +156,17 @@ final class MyArchiveReader: IOReader {
 }
 
 try await engine.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
+
+// load() returns the probe metadata it gathered anyway (discardable):
+// video size, codec, duration, tracks, container tags. nil on the
+// nativeRemoteHLS bypass or when the probe failed.
+let probe = try await engine.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
+probe?.videoWidth   // also live on the engine: engine.sourceVideoWidth / Height
+
+// One-shot probe without starting playback works for custom sources
+// too. The caller keeps reader ownership: probe() seeks/reads through
+// it and does NOT close() it; hand load() a fresh or rewound reader.
+let info = try AetherEngine.probe(source: .custom(MyArchiveReader(), formatHint: "mp4"))
 ```
 
 > **Security.** On the native path, bytes supplied by a custom `IOReader` are re-muxed to cleartext fMP4 and served via the loopback HLS cache (disk + `127.0.0.1`) to AVPlayer. This is fine for encrypted-at-rest archives (the source is decrypted in memory, never written to disk in original form), but is a cleartext exposure if the source is encrypted for content protection.
