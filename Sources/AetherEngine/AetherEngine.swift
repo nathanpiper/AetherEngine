@@ -626,6 +626,25 @@ public final class AetherEngine: ObservableObject {
     /// dedupe set at every restart.
     private let subtitleCueRetentionSeconds: Double = 300
 
+    /// How far past the playhead (source-PTS seconds) the embedded-
+    /// subtitle side demuxer may read before parking. Without this
+    /// gate the side demuxer races to EOF at network speed, which
+    /// (a) downloads the entire remaining source a second time in
+    /// parallel with playback and (b) accumulates every future cue
+    /// in `subtitleCues`, because `pruneOldSubtitleCues` only trims
+    /// BEHIND the playhead. On a large file with a PGS track the
+    /// bitmap cues (each retaining a decoded RGBA CGImage) pin
+    /// hundreds of MB to multiple GB and jetsam kills the app
+    /// (AetherEngine#31, 50-80 GB UHD remuxes on Apple TV 4K).
+    /// 90 s comfortably covers
+    /// the main pump's ~60-80 s production lead plus a network
+    /// hiccup on the subtitle connection; while parked, the reader's
+    /// stalled `readPacket` stops draining the persistent connection
+    /// and TCP backpressure (the 16 MB window high-water) pauses the
+    /// transfer server-side, so the second connection throttles to
+    /// playback rate instead of line rate.
+    nonisolated private static let embeddedSubtitleReadAheadSeconds: Double = 90
+
     // MARK: - Init
 
     /// Lifecycle notification observers, stored for cleanup.
@@ -2815,7 +2834,9 @@ public final class AetherEngine: ObservableObject {
     /// MKV demuxer's cue index is loaded before the real seek), then
     /// seeks slightly before the requested start time and streams
     /// subtitle packets through an `EmbeddedSubtitleDecoder`, emitting
-    /// cues back into the engine on the main actor.
+    /// cues back into the engine on the main actor. The loop paces
+    /// itself against the playhead (`embeddedSubtitleReadAheadSeconds`)
+    /// instead of racing to EOF; see the constant's doc for why.
     nonisolated private func runEmbeddedSubtitleReader(
         url: URL, reader: IOReader?, formatHint: String?,
         headers: [String: String], streamIndex: Int32, startAt: Double,
@@ -2931,39 +2952,101 @@ public final class AetherEngine: ObservableObject {
         var cuesEmitted = 0
         var firstCueLogged = false
 
-        while !Task.isCancelled {
+        // Playhead pacing (AetherEngine#31): track demux progress via
+        // every packet's timestamp (video/audio packets included; the
+        // subtitle stream alone is too sparse to gate on) and park the
+        // loop once it runs `embeddedSubtitleReadAheadSeconds` past
+        // the playhead. `playheadSnapshot` is refreshed lazily from
+        // the MainActor only when the threshold trips, which in steady
+        // state is a couple of hops per second at the lead boundary.
+        var playheadSnapshot = startAt
+        var parkLogged = false
+        var timeBaseCache: [Int32: AVRational] = [:]
+
+        readLoop: while !Task.isCancelled {
             guard let pkt = try? demuxer.readPacket() else {
                 break
             }
             totalPacketsRead += 1
             let streamIdx = pkt.pointee.stream_index
-            if streamIdx != streamIndex {
+
+            // Packet position in source-PTS seconds, from the packet's
+            // own stream timebase. NOPTS-valued packets don't advance
+            // the pacing clock.
+            let rawTS = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            var pktSeconds: Double?
+            if rawTS != Int64.min {
+                let ptb: AVRational
+                if let cached = timeBaseCache[streamIdx] {
+                    ptb = cached
+                } else {
+                    ptb = demuxer.stream(at: streamIdx)?.pointee.time_base
+                        ?? AVRational(num: 0, den: 1)
+                    timeBaseCache[streamIdx] = ptb
+                }
+                if ptb.num > 0, ptb.den > 0 {
+                    pktSeconds = Double(rawTS) * Double(ptb.num) / Double(ptb.den)
+                }
+            }
+
+            if streamIdx == streamIndex {
+                subtitlePacketsRead += 1
+                let pktPTS = pkt.pointee.pts
+                let event = decoder.decode(
+                    packet: pkt,
+                    streamTimeBase: tb
+                )
                 var p: UnsafeMutablePointer<AVPacket>? = pkt
                 trackedPacketFree(&p)
-                continue
-            }
-            subtitlePacketsRead += 1
-            let pktPTS = pkt.pointee.pts
-            let event = decoder.decode(
-                packet: pkt,
-                streamTimeBase: tb
-            )
-            var p: UnsafeMutablePointer<AVPacket>? = pkt
-            trackedPacketFree(&p)
-            if let event {
-                cuesEmitted += event.cues.count
-                if !firstCueLogged, let firstCue = event.cues.first {
-                    EngineLog.emit(
-                        "[AetherEngine] subtitle first cue: pktPTS=\(pktPTS) → " +
-                        "startTime=\(String(format: "%.3f", firstCue.startTime))s " +
-                        "endTime=\(String(format: "%.3f", firstCue.endTime))s",
-                        category: .engine
-                    )
-                    firstCueLogged = true
+                if let event {
+                    cuesEmitted += event.cues.count
+                    if !firstCueLogged, let firstCue = event.cues.first {
+                        EngineLog.emit(
+                            "[AetherEngine] subtitle first cue: pktPTS=\(pktPTS) → " +
+                            "startTime=\(String(format: "%.3f", firstCue.startTime))s " +
+                            "endTime=\(String(format: "%.3f", firstCue.endTime))s",
+                            category: .engine
+                        )
+                        firstCueLogged = true
+                    }
+                    await MainActor.run { [weak self] in
+                        guard !Task.isCancelled else { return }
+                        self?.applySubtitleEvent(event)
+                    }
                 }
-                await MainActor.run { [weak self] in
-                    guard !Task.isCancelled else { return }
-                    self?.applySubtitleEvent(event)
+            } else {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+            }
+
+            // Park until the playhead catches up to within the read-
+            // ahead window. Task cancellation (track switch, seek,
+            // stop) is observed by Task.sleep, which throws
+            // immediately on a cancelled task.
+            if let pktSeconds, pktSeconds > playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds {
+                while !Task.isCancelled {
+                    guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime }) else {
+                        break readLoop
+                    }
+                    playheadSnapshot = fresh
+                    if pktSeconds <= playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds {
+                        break
+                    }
+                    if !parkLogged {
+                        parkLogged = true
+                        EngineLog.emit(
+                            "[AetherEngine] embedded subtitle reader parked: " +
+                            "demuxPos=\(String(format: "%.1f", pktSeconds))s " +
+                            "playhead=\(String(format: "%.1f", playheadSnapshot))s " +
+                            "lead=\(Int(Self.embeddedSubtitleReadAheadSeconds))s",
+                            category: .engine
+                        )
+                    }
+                    do {
+                        try await Task.sleep(nanoseconds: 500_000_000)
+                    } catch {
+                        break readLoop
+                    }
                 }
             }
         }
