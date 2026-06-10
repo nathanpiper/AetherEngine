@@ -450,6 +450,34 @@ public final class Demuxer: @unchecked Sendable {
         )
     }
 
+    /// Font files attached to the container (MKV attachment streams).
+    /// Payload bytes live in the attachment stream's codec extradata;
+    /// filename and MIME type in its stream metadata. Non-font
+    /// attachments (cover art lives on ATTACHED_PIC video streams and
+    /// never reaches here; chapters/XML attachments are filtered by
+    /// the MIME/extension check) are skipped.
+    func fontAttachmentInfos() -> [FontAttachment] {
+        guard let ctx = formatContext else { return [] }
+        var fonts: [FontAttachment] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i],
+                  let codecpar = stream.pointee.codecpar,
+                  codecpar.pointee.codec_type == AVMEDIA_TYPE_ATTACHMENT,
+                  let extradata = codecpar.pointee.extradata,
+                  codecpar.pointee.extradata_size > 0
+            else { continue }
+            let filename = metadataValue(stream.pointee.metadata, key: "filename")
+            let mimeType = metadataValue(stream.pointee.metadata, key: "mimetype")
+            guard FontAttachment.isFontPayload(mimeType: mimeType, filename: filename) else { continue }
+            fonts.append(FontAttachment(
+                filename: filename ?? "font-\(i).ttf",
+                mimeType: mimeType ?? "",
+                data: Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
+            ))
+        }
+        return fonts
+    }
+
     /// Read a metadata value from an AVDictionary.
     private func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
         guard let dict = dict else { return nil }

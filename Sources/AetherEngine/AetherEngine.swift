@@ -615,6 +615,15 @@ public final class AetherEngine: ObservableObject {
     public private(set) var sourceVideoWidth: Int32 = 0
     public private(set) var sourceVideoHeight: Int32 = 0
 
+    /// Font files attached to the loaded container (MKV attachments),
+    /// populated once during `load()` from the probe demuxer; empty
+    /// when the source carries none. Hosts rendering ASS styling
+    /// themselves write these to a directory and point their
+    /// renderer's font config at it (AetherEngine#30). Deliberately
+    /// not `@Published` and not part of `SourceProbe`: the payloads
+    /// can be 10-30 MB and only playback hosts need them.
+    public private(set) var fontAttachments: [FontAttachment] = []
+
     /// Last-detected source video codec id. Latched in `load(url:)` and
     /// reused by the audio-track-switch reload path so it can re-derive
     /// the same `activeVideoDecoder` label without re-running the
@@ -1092,6 +1101,7 @@ public final class AetherEngine: ObservableObject {
         audioTracks = []
         subtitleTracks = []
         metadata = nil
+        fontAttachments = []
         subtitleCueDiagnosticCount = 0
 
         // Native remote-HLS live path: skip the probe + loopback pipeline
@@ -1236,6 +1246,7 @@ public final class AetherEngine: ObservableObject {
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         metadata = probeOpened ? probe.mediaMetadata() : nil
+        fontAttachments = probeOpened ? probe.fontAttachmentInfos() : []
         // Assemble the caller-facing SourceProbe now, while the probe
         // demuxer is open: ownership transfers to loadNative /
         // loadSoftware further down, after which the streams are gone
@@ -3486,6 +3497,7 @@ public final class AetherEngine: ObservableObject {
         loadedSidecarURL = nil
         isSubtitleActive = false
         subtitleCues = []
+        fontAttachments = []
         isLoadingSubtitles = false
         // Audio-track state belongs to the host's picker; clear it so a
         // stale index from the previous session can't be re-applied via

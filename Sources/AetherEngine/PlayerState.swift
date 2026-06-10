@@ -433,6 +433,50 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     }
 }
 
+/// An attached file carried by the container (MKV attachment streams),
+/// filtered to font payloads. Anime releases embed the TTF/OTF fonts
+/// their ASS styles reference; hosts that render ASS styling themselves
+/// (see `LoadOptions.preserveASSMarkup`) hand these to their renderer's
+/// font directory so the authored typography resolves (AetherEngine#30).
+public struct FontAttachment: Sendable, Equatable {
+    /// Attachment filename from the container metadata ("filename").
+    public let filename: String
+    /// MIME type from the container metadata ("mimetype"); empty when
+    /// the container does not carry one.
+    public let mimeType: String
+    /// The font file bytes.
+    public let data: Data
+
+    public init(filename: String, mimeType: String, data: Data) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.data = data
+    }
+
+    /// True when the MIME type or, as a fallback for missing / generic
+    /// MIME, the filename extension identifies a font payload.
+    static func isFontPayload(mimeType: String?, filename: String?) -> Bool {
+        let fontMIMEs: Set<String> = [
+            "font/ttf", "font/otf", "font/sfnt", "font/collection",
+            "application/x-truetype-font", "application/vnd.ms-opentype",
+            "application/font-sfnt", "application/x-font-ttf",
+            "application/x-font-otf",
+        ]
+        if let mime = mimeType?.lowercased(), fontMIMEs.contains(mime) {
+            return true
+        }
+        let fontExtensions: Set<String> = ["ttf", "otf", "ttc"]
+        if let ext = filename.flatMap({ ($0 as NSString).pathExtension.lowercased() }),
+           fontExtensions.contains(ext) {
+            // Only trust the extension when the MIME is absent or generic;
+            // a declared non-font MIME wins.
+            let mime = mimeType?.lowercased() ?? ""
+            return mime.isEmpty || mime == "application/octet-stream"
+        }
+        return false
+    }
+}
+
 /// Container-level media metadata (tags + embedded cover art) for the
 /// loaded source. Every field is optional: audio files frequently ship
 /// with partial or no tags, and video files usually have none. Built
