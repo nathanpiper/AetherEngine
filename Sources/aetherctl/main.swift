@@ -353,8 +353,11 @@ private func runValidate(url: URL, dvModeAvailable: Bool) -> Int32 {
         return 1
     }
 
-    process.waitUntilExit()
+    // Read the combined output BEFORE waiting for exit: the validator can
+    // emit more than the kernel pipe buffer (~64 KB), and waiting first
+    // deadlocks (child blocked on write, parent blocked in waitUntilExit).
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
     if let text = String(data: data, encoding: .utf8), !text.isEmpty {
         print(text)
     }

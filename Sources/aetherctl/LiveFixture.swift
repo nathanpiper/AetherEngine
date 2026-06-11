@@ -329,16 +329,15 @@ final class LiveFixture: @unchecked Sendable {
     /// (simulating a single recoverable drop). The next accepted connection
     /// (the reconnect) is served normally.
     private func serve(_ fd: Int32) {
-        // Track whether we own the close of this fd. The drop timer may
-        // close it first (to force RST); in that case the defer below
-        // must not double-close.
-        var fdClosedByDropTimer = false
-
+        // Close ownership: whoever removes the fd from `clientFds` (under
+        // stateLock) owns the close. The drop timer, stop(), and this
+        // defer all follow that rule, so the fd is closed exactly once
+        // and a recycled fd number can never be closed by a stale party.
         defer {
             stateLock.lock()
-            clientFds.remove(fd)
+            let owned = clientFds.remove(fd) != nil
             stateLock.unlock()
-            if !fdClosedByDropTimer {
+            if owned {
                 close(fd)
             }
         }
@@ -370,10 +369,17 @@ final class LiveFixture: @unchecked Sendable {
             let item = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.stateLock.lock()
-                let alreadyFired = self.didFireDrop
-                if !alreadyFired { self.didFireDrop = true }
+                // Claim close ownership by removing the fd from clientFds.
+                // If the connection already ended (serve()'s defer removed
+                // it), the fd number may have been recycled by a new
+                // accept(), so closing it here would kill the very
+                // reconnect this drop exists to exercise. In that case
+                // don't latch didFireDrop either: the drop re-arms on the
+                // next connection so it still fires mid-stream once.
+                let owned = !self.didFireDrop && self.clientFds.remove(fd) != nil
+                if owned { self.didFireDrop = true }
                 self.stateLock.unlock()
-                if !alreadyFired {
+                if owned {
                     print("[LiveFixture] Injecting mid-stream drop after ~\(Int(dropDelay))s (fd=\(fd))")
                     // SO_LINGER l_linger=0 causes close() to send RST.
                     var ling = Darwin.linger()
@@ -382,7 +388,6 @@ final class LiveFixture: @unchecked Sendable {
                     _ = setsockopt(fd, SOL_SOCKET, SO_LINGER,
                                    &ling, socklen_t(MemoryLayout<Darwin.linger>.size))
                     Darwin.close(fd)
-                    fdClosedByDropTimer = true
                 }
             }
             workQueue.asyncAfter(deadline: .now() + dropDelay, execute: item)
