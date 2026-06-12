@@ -1557,6 +1557,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// HTTP requests served by the loopback HLS server.
     var serverRequestCount: Int { subsystemSnapshot().server?.requestCount ?? 0 }
 
+    /// Number of live segments the provider currently lists (0 for VOD
+    /// sessions and before the first cut). Read by the engine's
+    /// live-reload watchdog as the "producer is serving" evidence:
+    /// >= the 2-segment startup cushion means the manifest hold has
+    /// been released and AVPlayer has real content to become ready
+    /// against. Snapshot under restartLock, mirroring
+    /// `liveScrubThumbnailSource`'s provider-read convention.
+    var liveSegmentCount: Int {
+        guard isLiveSession else { return 0 }
+        restartLock.lock()
+        let prov = provider
+        restartLock.unlock()
+        return prov?.segmentCount ?? 0
+    }
+
     /// Bytes currently held in AudioBridge's FIFO + swr-delay buffers.
     var audioBridgeLiveBytes: Int { subsystemSnapshot().audioBridge?.liveBytes.totalBytes ?? 0 }
 

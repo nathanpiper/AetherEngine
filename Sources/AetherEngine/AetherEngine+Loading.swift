@@ -196,6 +196,7 @@ extension AetherEngine {
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
+        liveRejoin: Bool = false,
         preopenedDemuxer: Demuxer? = nil,
         generation: UInt64
     ) async throws {
@@ -425,9 +426,22 @@ extension AetherEngine {
         // through its lead while the producer rides out the warm-up, leaving
         // only a brief startup hiccup. Verified on device: 8 s made the
         // startup pause far worse (8-10 s) than the 4 s default (~1 s).
+        // Live REJOIN (audio-switch reload, background-return reopen):
+        // skip the host's explicit initial seek and let AVPlayer pick
+        // its standard live join (edge minus holdback). The rejoined
+        // playlist can present a multi-segment backlog (the upstream
+        // re-serves its buffer at I/O speed), and the zero-tolerance
+        // seek-to-0 against that backlog wedged the reloaded item in
+        // waitingToPlay without ever reaching readyToPlay (device
+        // repro: tvOS 26, Jellyfin live stream.ts, audio-switch reload
+        // froze the frame permanently). Initial live joins keep the
+        // seek: their first manifest is held to the 2-segment cushion,
+        // where seg0 IS the intended start. See LiveReloadPolicy.
         host.load(url: playbackURL,
                   startPosition: startPosition,
-                  perFrameHDR: true)
+                  perFrameHDR: true,
+                  skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
+                      isLive: isLive, isRejoin: liveRejoin))
     }
 
     /// Open a `SoftwarePlaybackHost` against the source and wire its
@@ -839,8 +853,9 @@ extension AetherEngine {
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
                     // Live rejoins at the live edge; a stale playhead
                     // resume position is meaningless against the fresh
-                    // source connection.
-                    startPosition: loadedOptions.isLive ? nil : (resumeAt > 1 ? resumeAt : nil),
+                    // source connection (see LiveReloadPolicy).
+                    startPosition: LiveReloadPolicy.resumePosition(
+                        isLive: loadedOptions.isLive, currentTime: resumeAt),
                     audioSourceStreamIndex: audioStreamIndex,
                     isLive: loadedOptions.isLive,
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
@@ -864,7 +879,8 @@ extension AetherEngine {
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
                     // Live rejoins at the live edge (see loadSoftware above).
-                    startPosition: loadedOptions.isLive ? nil : (resumeAt > 1 ? resumeAt : nil),
+                    startPosition: LiveReloadPolicy.resumePosition(
+                        isLive: loadedOptions.isLive, currentTime: resumeAt),
                     audioSourceStreamIndex: audioStreamIndex,
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
@@ -878,6 +894,12 @@ extension AetherEngine {
                     // segment plan" (device repro: KiKA).
                     isLive: loadedOptions.isLive,
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
+                    // A reload of a live session is a live REJOIN: the host
+                    // must skip its initial seek so AVPlayer joins at its own
+                    // live edge instead of the rebuilt playlist's (possibly
+                    // 60 s stale) start. See LiveReloadPolicy + the device
+                    // repro documented there.
+                    liveRejoin: loadedOptions.isLive,
                     preopenedDemuxer: customPreopened,
                     generation: gen
                 )
@@ -913,6 +935,14 @@ extension AetherEngine {
             // track switch in a session.
             startMemoryProbe()
             startLiveTelemetrySampler()
+            // Safety net for the live rejoin: if the rebuilt AVPlayer item
+            // never reaches readyToPlay although the producer is serving,
+            // fail the reload like a load error instead of leaving the user
+            // on an indefinitely frozen frame. Scoped to live reloads on the
+            // native path; initial joins and VOD reloads never arm it.
+            if loadedOptions.isLive, !wasOnSoftwarePath {
+                armLiveReloadWatchdog(generation: gen)
+            }
             EngineLog.emit("[AetherEngine] reload: state=.playing total=\(elapsedMs(since: reloadStart))ms", category: .engine)
         } catch is CancellationError {
             // Superseded by a newer load/stop: it owns the engine state.
@@ -945,6 +975,85 @@ extension AetherEngine {
     /// timestamps.
     private func elapsedMs(since start: DispatchTime) -> Int {
         Int(Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+    }
+
+    /// Arm the live-RELOAD readiness watchdog. Called only from the
+    /// reload entry points (`reloadWithAudioOverride` native branch,
+    /// `reloadAtCurrentPosition` after a live URL reopen), never from
+    /// an initial load, so a slow-but-progressing first join can never
+    /// trip it.
+    ///
+    /// What it guards: the device-verified live-reload wedge where the
+    /// rebuilt AVPlayer item fetched init.mp4 and every listed segment
+    /// but never published `readyToPlay`, sitting in `waitingToPlay`
+    /// (EvaluatingBufferingRate -> WaitingToMinimizeStalls) with a
+    /// frozen frame forever. The engine believed the reload succeeded
+    /// (`state == .playing`), so nothing upstream ever recovered.
+    ///
+    /// Semantics:
+    /// - Polls once per second. Exits silently (no-op) when the reload
+    ///   generation is superseded, the session left the native
+    ///   backend, the state went terminal, or the task is cancelled
+    ///   (stopInternal cancels it on every teardown).
+    /// - Exits successfully the moment the host publishes readiness.
+    /// - The 10 s readiness budget starts only once the pipeline is
+    ///   demonstrably SERVING: the producer has cut at least the
+    ///   2-segment startup cushion AND the loopback server has written
+    ///   bytes to AVPlayer. A reload against a slow upstream (segments
+    ///   not produced yet) therefore never misfires; genuinely dead
+    ///   sources keep failing through the existing manifest-hold
+    ///   timeout / -12888 machinery instead.
+    /// - On expiry it fails the reload exactly like a load error:
+    ///   tears the pipeline down and publishes `state = .error`, so
+    ///   the host's existing fallback / retune path takes over.
+    /// - Hard 60 s lifetime so an inconclusive watchdog (producer
+    ///   never served) cannot linger across a long session.
+    func armLiveReloadWatchdog(generation: UInt64) {
+        liveReloadWatchdogTask?.cancel()
+        liveReloadWatchdogTask = Task { @MainActor [weak self] in
+            let readinessBudget: TimeInterval = 10
+            let overallBudget: TimeInterval = 60
+            let started = Date()
+            var servingSince: Date? = nil
+            while true {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                guard let self else { return }
+                // Superseded by a newer load/stop: that owner's state
+                // machine is authoritative now.
+                guard self.loadGeneration == generation else { return }
+                // Only the native AVPlayer path has the readyToPlay
+                // contract this watchdog checks.
+                guard self.playbackBackend == .native,
+                      let host = self.nativeHost else { return }
+                if case .error = self.state { return }
+                if self.state == .idle { return }
+                // Success: the item became ready; normal playback owns
+                // the session from here.
+                if host.isReady { return }
+                if servingSince == nil,
+                   let session = self.nativeVideoSession,
+                   session.liveSegmentCount >= 2,
+                   session.serverLifetimeBytesSent > 0 {
+                    servingSince = Date()
+                }
+                if let serving = servingSince,
+                   Date().timeIntervalSince(serving) >= readinessBudget {
+                    EngineLog.emit(
+                        "[AetherEngine] live reload watchdog: AVPlayer item never reached "
+                        + "readyToPlay \(Int(readinessBudget))s after the producer started "
+                        + "serving (segments=\(self.nativeVideoSession?.liveSegmentCount ?? -1), "
+                        + "serverBytes=\(self.nativeVideoSession?.serverLifetimeBytesSent ?? -1)); "
+                        + "failing the reload so the host can retune",
+                        category: .engine
+                    )
+                    self.stopInternal()
+                    self.state = .error("Live reload failed: player never became ready")
+                    return
+                }
+                if Date().timeIntervalSince(started) >= overallBudget { return }
+            }
+        }
     }
 
     /// Called (once per session) when either backend's HDR10+ scan

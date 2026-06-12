@@ -390,6 +390,14 @@ public final class AetherEngine: ObservableObject {
     /// `EngineLog.handler` so the host's diagnostic overlay sees it too.
     var memoryProbeTask: Task<Void, Never>?
 
+    /// Live-RELOAD readiness watchdog (see `armLiveReloadWatchdog`).
+    /// Armed only by the reload entry points of a LIVE native session;
+    /// nil for initial loads, VOD reloads, and the software path.
+    /// Cancelled in `stopInternal` so it can never outlive the session
+    /// it was watching (a successor load's stopInternal cancels the
+    /// predecessor's watchdog before the new pipeline exists).
+    var liveReloadWatchdogTask: Task<Void, Never>?
+
     /// 1 Hz live-telemetry sampler. Mirrors the lifecycle of
     /// `memoryProbeTask`: started when the engine enters `.playing`
     /// (load completes) and torn down in `stopInternal`. The sampler
@@ -1293,6 +1301,12 @@ public final class AetherEngine: ObservableObject {
                     audioBridgeMode: options.audioBridgeMode,
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
+                    // Set only by reloadAtCurrentPosition's live reopen:
+                    // the host must skip its initial seek so AVPlayer
+                    // joins the rebuilt (possibly backlog-bearing)
+                    // playlist at its own live edge. Hosts cannot set
+                    // this; fresh joins keep the verified seek-to-0.
+                    liveRejoin: options.isLiveRejoin,
                     preopenedDemuxer: probeOpened ? probe : nil,
                     generation: gen
                 )
@@ -1433,9 +1447,25 @@ public final class AetherEngine: ObservableObject {
         // Live rejoins at the live edge: the pre-suspend playhead is
         // stale by the suspension duration and may already have slid
         // out of the window (reloadWithAudioOverride nils it for live
-        // for the same reason).
-        let resume: Double? = loadedOptions.isLive ? nil : (pos > 1 ? pos : nil)
-        try await load(url: url, startPosition: resume, options: loadedOptions)
+        // for the same reason). See LiveReloadPolicy.
+        let resume: Double? = LiveReloadPolicy.resumePosition(
+            isLive: loadedOptions.isLive, currentTime: pos)
+        // Mark the reopen as a live REJOIN so loadNative tells the host
+        // to skip its initial seek: the same upstream URL re-serves its
+        // transcode buffer from the start, so the rebuilt playlist can
+        // present a multi-segment backlog where the fresh-join contract
+        // (seg0 == cushioned live edge) no longer holds.
+        var options = loadedOptions
+        options.isLiveRejoin = options.isLive
+        try await load(url: url, startPosition: resume, options: options)
+        // Same safety net as the audio-switch reload: a live reopen whose
+        // AVPlayer never becomes ready while the producer is serving must
+        // fail visibly instead of freezing. Initial loads never arm this
+        // (the flag is reload-scoped), and the remote-HLS bypass has no
+        // loopback producer to watch.
+        if options.isLive, !options.nativeRemoteHLS, playbackBackend == .native {
+            armLiveReloadWatchdog(generation: loadGeneration)
+        }
     }
 
     public func seek(to seconds: Double) async {
@@ -1693,8 +1723,22 @@ public final class AetherEngine: ObservableObject {
     /// that's already active are no-ops.
     public func selectAudioTrack(index: Int) {
         // Custom sources rebuild on the retained reader; a forward-only reader
-        // cannot rewind, so it stays a no-op.
-        if isCustomSource && !customSourceIsSeekable { return }
+        // cannot rewind, so it stays a no-op. This covers the live HLS-ingest
+        // readers (incl. demuxed-audio companion sessions, whose published
+        // audioTracks come from the side demuxer): rebuilding their pipeline
+        // would have to re-consume an already-drained FIFO and would stall
+        // silently, so the switch is refused up front. Logged (not silent) so
+        // a host picker that appears to do nothing is explainable from the
+        // session log.
+        if isCustomSource && !customSourceIsSeekable {
+            EngineLog.emit(
+                "[AetherEngine] selectAudioTrack(\(index)) ignored: forward-only custom "
+                + "source cannot rebuild its pipeline (live ingest / demuxed-audio "
+                + "sessions switch tracks only via a fresh load)",
+                category: .engine
+            )
+            return
+        }
         guard let url = loadedURL else { return }
         guard audioTracks.contains(where: { $0.id == index }) else {
             EngineLog.emit(
@@ -1764,6 +1808,11 @@ public final class AetherEngine: ObservableObject {
         // currentAVPlayer sink to see a nil publish).
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
+        // The reload watchdog belongs to the session being torn down;
+        // its generation check would make it a no-op anyway, but
+        // cancelling here keeps no stray 1 Hz poller alive.
+        liveReloadWatchdogTask?.cancel()
+        liveReloadWatchdogTask = nil
         // Abort a probe blocked in open/find_stream_info (see
         // `inFlightProbeDemuxer`). Lock-free + idempotent; the owning
         // load() unwinds with openFailed and clears the reference.

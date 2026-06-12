@@ -218,6 +218,23 @@ public struct LoadOptions: Sendable, Equatable {
     /// bitmap tracks are untouched. Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
+    /// ENGINE-INTERNAL: marks this load as a live REJOIN (a reload of
+    /// an already-running live session: background-return reopen via
+    /// `reloadAtCurrentPosition`). Not part of the public API and not
+    /// settable through the public initializer; hosts always load with
+    /// the default `false`.
+    ///
+    /// Why it exists: a live rejoin reuses the SAME upstream URL, and
+    /// servers like Jellyfin re-serve their transcode buffer from the
+    /// start at I/O speed, so the rebuilt producer presents a
+    /// multi-segment backlog at AVPlayer's first playlist fetch
+    /// instead of the fresh-join 2-segment cushion. The native load
+    /// path must then skip its explicit initial seek and let AVPlayer
+    /// pick its own live-edge join (see `LiveReloadPolicy`), or the
+    /// reloaded item can wedge in `waitingToPlay` without ever
+    /// reaching `readyToPlay`. Only meaningful when `isLive` is true.
+    var isLiveRejoin: Bool = false
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
