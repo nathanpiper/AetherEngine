@@ -12,8 +12,11 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible {
     case playlistInvalid(reason: String)
     /// EXT-X-KEY with METHOD != NONE. AES-128 is a later, evidence-gated phase.
     case encryptedNotSupported
-    /// EXT-X-MAP present, or the first fetched segment does not start with
-    /// the MPEG-TS sync byte 0x47. fMP4-segment HLS is a later phase.
+    /// EXT-X-MAP present, or the first fetched segment is not in a
+    /// format the reader's role accepts: the MAIN variant must start
+    /// with the MPEG-TS sync byte 0x47, a companion AUDIO rendition may
+    /// additionally be Apple packed audio (ID3v2-prefixed raw ADTS AAC,
+    /// see `LiveSegmentFormat`). fMP4-segment HLS is a later phase.
     case unsupportedSegmentFormat
     /// The playlist refreshed but produced no new segment for the stall
     /// budget (provider died or froze).
@@ -21,12 +24,16 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible {
     /// The selected variant references an alternate-audio group whose
     /// renditions live in a separate playlist (EXT-X-MEDIA:TYPE=AUDIO
     /// with URI) in a shape the ingest still cannot handle. The common
-    /// shape (ARD-style demuxed audio, device repro: Das Erste HD via
-    /// ARD's CDN) IS supported via a companion reader + side demuxer;
-    /// this error remains for the residual cases (unresolvable
-    /// rendition URI, and the engine-side guard for demuxed audio on
-    /// the software video path). Failing fast at join time beats
-    /// silently playing video without sound.
+    /// shapes ARE supported via a companion reader + side demuxer:
+    /// MPEG-TS audio renditions, and Apple packed audio (raw ADTS AAC
+    /// with the ID3 PRIV program-clock timestamp; ARD-style channels,
+    /// device repro: Das Erste HD via ARD's CDN). This error remains
+    /// for the residual cases: unresolvable rendition URI, packed audio
+    /// whose first segment carries NO parsable PRIV timestamp (no way
+    /// to align the side audio to the video's program clock without
+    /// guessing, which risks silent A/V desync), and the engine-side
+    /// guard for demuxed audio on the software video path. Failing fast
+    /// at join time beats silently playing video without sound.
     case demuxedAudioNotSupported
 
     public var description: String {

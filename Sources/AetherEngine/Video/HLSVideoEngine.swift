@@ -120,6 +120,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// like the other subsystem refs.
     var sideAudioDemuxer: Demuxer?
 
+    /// Packed-audio companion state (Apple HLS packed audio: raw ADTS
+    /// AAC rendition, ID3 PRIV program-clock anchor). Set in `start()`
+    /// when the companion resolved as packed; `makeProducer` threads
+    /// both into the producer so it SYNTHESIZES side-audio timestamps
+    /// on the shared 90 kHz program clock (FFmpeg's raw "aac" demuxer
+    /// produces neither). `startPts` is the PRIV timestamp rescaled
+    /// into the side audio stream's own time base; the fallback
+    /// duration is one AAC frame (1024 samples) in the same base, for
+    /// packets the demuxer hands over without a duration. nil / 0 for
+    /// TS companions and every muxed-audio session.
+    private var packedSideAudioStartPts: Int64?
+    private var packedSideAudioFallbackDurationPts: Int64 = 0
+
     /// Captured at `start()` so the restart path can spin up a fresh
     /// producer at any segment index without re-running the full
     /// DV-classification / codec-pick logic.
@@ -881,36 +894,72 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //     main variant is video-only and the source carries its
         //     audio in a separate rendition playlist, open a SIDE
         //     demuxer over the companion reader (same custom-AVIO
-        //     mechanism, the rendition is MPEG-TS like the main stream)
-        //     and run the whole audio pipeline below against ITS audio
-        //     stream. The open blocks on the companion's first segment
-        //     bytes (the companion ingest is lazy and starts on this
-        //     first read), the same way the main probe blocked on the
-        //     main reader. Any failure here fails the LOAD: shipping a
-        //     silently video-only session is exactly the failure mode
-        //     the old fail-fast existed to prevent, and a thrown start()
-        //     sends the host down its server-muxed fallback route.
+        //     mechanism) and run the whole audio pipeline below against
+        //     ITS audio stream. The rendition is either MPEG-TS or
+        //     Apple PACKED AUDIO (raw ADTS AAC, ARD-style); the
+        //     companion classifies its first segment before publishing
+        //     any byte, so the blocking resolve below is what decides
+        //     the FFmpeg demuxer ("mpegts" vs "aac") without consuming
+        //     stream data. The open then blocks on the companion's
+        //     first segment bytes, the same way the main probe blocked
+        //     on the main reader. Any failure here fails the LOAD:
+        //     shipping a silently video-only session is exactly the
+        //     failure mode the old fail-fast existed to prevent, and a
+        //     thrown start() sends the host down its server-muxed
+        //     fallback route.
         let audioDem: Demuxer
         if isLiveSession, dem.audioStreamIndex < 0, let companion = companionAudioReader {
+            let formatHint: String
+            if let info = companion as? LiveIngestSourceInfo {
+                guard let resolved = info.resolveSegmentFormatHint() else {
+                    // Terminal ingest (or no first segment inside the
+                    // resolve bound): the companion can't deliver audio.
+                    throw HLSVideoEngineError.openFailed(
+                        reason: "demuxed-audio companion produced no classifiable first segment")
+                }
+                formatHint = resolved
+            } else {
+                // Non-ingest custom companions keep the previous TS contract.
+                formatHint = "mpegts"
+            }
             let side = Demuxer()
             do {
-                try side.open(reader: companion, formatHint: "mpegts", isLive: true)
+                try side.open(reader: companion, formatHint: formatHint, isLive: true)
             } catch {
                 throw HLSVideoEngineError.openFailed(
                     reason: "demuxed-audio companion open failed (\(error))")
             }
-            guard side.audioStreamIndex >= 0 else {
+            guard side.audioStreamIndex >= 0,
+                  let sideAudioStream = side.stream(at: side.audioStreamIndex) else {
                 side.close()
                 throw HLSVideoEngineError.openFailed(
                     reason: "demuxed-audio companion has no audio stream")
+            }
+            // Packed audio: anchor the producer's synthesized side-audio
+            // clock on the segment's ID3 PRIV program-clock timestamp,
+            // rescaled into the side stream's own time base (the raw
+            // "aac" demuxer's 1/28224000). Guaranteed non-nil for an
+            // "aac" resolve (the reader goes terminal otherwise); the
+            // guard is defensive.
+            if formatHint == "aac" {
+                guard let offset90k = (companion as? LiveIngestSourceInfo)?
+                    .packedAudioTimestampOffset90k else {
+                    side.close()
+                    throw HLSVideoEngineError.openFailed(
+                        reason: "packed-audio companion carries no program-clock timestamp")
+                }
+                let tb = sideAudioStream.pointee.time_base
+                packedSideAudioStartPts = av_rescale_q(
+                    offset90k, AVRational(num: 1, den: 90000), tb)
             }
             restartLock.lock()
             sideAudioDemuxer = side
             restartLock.unlock()
             audioDem = side
             EngineLog.emit(
-                "[HLSVideoEngine] demuxed-audio companion opened: side demuxer "
-                + "audioStreamIndex=\(side.audioStreamIndex)",
+                "[HLSVideoEngine] demuxed-audio companion opened: format=\(formatHint) "
+                + "side demuxer audioStreamIndex=\(side.audioStreamIndex)"
+                + (packedSideAudioStartPts.map { " packedStartPts=\($0) (side TB)" } ?? ""),
                 category: .session
             )
         } else {
@@ -1133,6 +1182,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             }
+        }
+
+        // 6a-post. Packed side audio: per-packet fallback advance for
+        //     the producer's synthesized clock, one AAC frame in the
+        //     side stream's time base. Computed AFTER the pick + repair
+        //     above so frame_size / sample_rate are as filled-in as
+        //     they will get (48 kHz default mirrors the repair).
+        if packedSideAudioStartPts != nil, audioStreamIndex >= 0,
+           let sideStream = audioDem.stream(at: audioStreamIndex) {
+            let acp = sideStream.pointee.codecpar.pointee
+            let samples = acp.frame_size > 0 ? Int64(acp.frame_size) : 1024
+            let rate = acp.sample_rate > 0 ? Int64(acp.sample_rate) : 48000
+            let tb = sideStream.pointee.time_base
+            packedSideAudioFallbackDurationPts = (tb.num > 0 && tb.den > 0)
+                ? max(1, samples * Int64(tb.den) / (rate * Int64(tb.num)))
+                : 1
         }
 
         // 6b. Attempt the cascade. The bridge instance, if needed, is
@@ -1708,7 +1773,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             desiredFirstVideoTfdtPts: desiredVideoTfdt,
             desiredFirstAudioTfdtPts: desiredAudioTfdt,
             segmentBoundaries: segmentBoundaries,
-            isLive: isLiveSession
+            isLive: isLiveSession,
+            packedSideAudioStartPts: packedSideAudioStartPts,
+            packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()

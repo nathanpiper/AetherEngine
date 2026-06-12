@@ -8,8 +8,9 @@ import Foundation
 /// options: <isLive>)`.
 ///
 /// Phase-1 contract (see the 2026-06-11 design spec): unencrypted TS
-/// segments only. Encrypted playlists (EXT-X-KEY), fMP4 playlists
-/// (EXT-X-MAP), non-TS first segments, unreachable/invalid playlists, and
+/// segments only on the MAIN variant. Encrypted playlists (EXT-X-KEY),
+/// fMP4 playlists (EXT-X-MAP), unaccepted first-segment formats (see
+/// `Role` / `LiveSegmentFormat`), unreachable/invalid playlists, and
 /// stalled providers all terminate the stream with a logged
 /// `HLSIngestError`; the read side then errors and the host falls back.
 ///
@@ -18,10 +19,18 @@ import Foundation
 /// supported since the companion-reader commit: the resolver picks the
 /// variant's audio rendition (DEFAULT=YES preferred), spins up a SECOND
 /// `HLSLiveIngestReader` on its playlist, and exposes it as
-/// `companionAudioReader` for the engine's side demuxer. Only an
-/// unresolvable rendition URI still fails with
-/// `HLSIngestError.demuxedAudioNotSupported` (host falls back to the
-/// server-muxed route).
+/// `companionAudioReader` for the engine's side demuxer. The companion
+/// accepts both MPEG-TS audio renditions and Apple PACKED AUDIO (raw
+/// ADTS AAC segments, each prefixed with an ID3v2 tag whose PRIV frame
+/// carries the 90 kHz program-clock timestamp; ARD's masteraudio1
+/// rendition is this shape). The companion classifies its first
+/// segment (`resolveSegmentFormatHint`) so the engine opens the side
+/// demuxer with the matching FFmpeg demuxer, and surfaces the PRIV
+/// timestamp (`packedAudioTimestampOffset90k`) so the producer can
+/// synthesize program-clock side-audio timestamps. Residual failures
+/// keep `HLSIngestError.demuxedAudioNotSupported` (unresolvable
+/// rendition URI, packed audio without a parsable PRIV timestamp) so
+/// the host falls back to the server-muxed route.
 ///
 /// Forward-only: `seek` always returns -1 (including AVSEEK_SIZE; length is
 /// unknown). Requires the engine's live custom-source gates (same commit
@@ -31,7 +40,19 @@ import Foundation
 /// extreme-bitrate sources transiently hold one fetched segment on top.
 /// Switching to streamed segment reads is a P2 option if that ever bites.
 public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @unchecked Sendable {
+
+    /// What this reader ingests; decides which first-segment formats
+    /// are acceptable. The MAIN variant keeps the strict TS contract
+    /// (engine video pipeline + side-machinery all assume TS); a
+    /// companion AUDIO rendition additionally accepts Apple packed
+    /// audio (see `LiveSegmentFormat`).
+    enum Role {
+        case mainVideo
+        case companionAudio
+    }
+
     private let playlistURL: URL
+    private let role: Role
     private let fifo = ByteFIFO(capacity: 16 * 1024 * 1024)
     private let session: URLSession
     private var ingestTask: Task<Void, Never>?
@@ -54,6 +75,25 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// startLock; installed by the resolver BEFORE any segment byte can
     /// reach the FIFO so the consumer-side ordering guarantee holds.
     private var _companionAudioReader: HLSLiveIngestReader?
+
+    /// FFmpeg demuxer name for this reader's stream ("mpegts" / "aac"),
+    /// classified from the FIRST segment's leading bytes. Protected by
+    /// startLock; written before that segment's first byte is published
+    /// to the FIFO (same ordering contract as `upstreamTargetDuration`).
+    private var _segmentFormatHint: String?
+
+    /// Apple packed-audio program-clock anchor (see
+    /// `LiveIngestSourceInfo.packedAudioTimestampOffset90k`). Protected
+    /// by startLock; same publish-before-first-byte ordering as the
+    /// format hint, parsed from the same first segment.
+    private var _packedAudioTimestampOffset90k: Int64?
+
+    /// Wakes `resolveSegmentFormatHint` waiters. `formatResolved` flips
+    /// once the classification is published OR the ingest exits without
+    /// one (terminal error, cancellation, close-before-start), so the
+    /// resolve can never outwait a dead ingest.
+    private let formatCondition = NSCondition()
+    private var formatResolved = false
 
     /// Terminal ingest error, readable by the host for fallback logging.
     public var terminalError: HLSIngestError? {
@@ -81,6 +121,41 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         startLock.withLock { _companionAudioReader }
     }
 
+    /// `LiveIngestSourceInfo`: Apple packed-audio program-clock anchor
+    /// of THIS reader's stream, nil for TS streams (and packed streams
+    /// whose first segment hasn't been classified yet; consumers that
+    /// resolved the format hint as "aac" are guaranteed non-nil, see
+    /// `resolveSegmentFormatHint`).
+    public var packedAudioTimestampOffset90k: Int64? {
+        startLock.withLock { _packedAudioTimestampOffset90k }
+    }
+
+    /// `LiveIngestSourceInfo`: blocking format resolve for the side
+    /// demuxer. Starts the ingest (idempotent) and waits, bounded, for
+    /// the first segment's classification. Classification happens
+    /// BEFORE any byte is published to the FIFO, so resolving here
+    /// consumes no stream data; the demuxer that opens right after
+    /// reads the stream from its first byte. Returns nil when the
+    /// ingest went terminal first (or never produced a first segment
+    /// inside the bound), which callers treat as a failed bring-up.
+    public func resolveSegmentFormatHint() -> String? {
+        startIfNeeded()
+        let deadline = Date().addingTimeInterval(Self.formatResolveTimeout)
+        formatCondition.lock()
+        while !formatResolved, Date() < deadline {
+            if !formatCondition.wait(until: deadline) { break }
+        }
+        formatCondition.unlock()
+        return startLock.withLock { _segmentFormatHint }
+    }
+
+    /// Wall-clock bound for `resolveSegmentFormatHint`. The ingest's
+    /// own fetch timeouts (10 s request / 30 s resource, 3 segment
+    /// attempts) keep a healthy-but-slow join inside this; a join that
+    /// can't deliver one audio segment in 30 s is dead and the load
+    /// should fail over to the server-muxed route instead of hanging.
+    private static let formatResolveTimeout: TimeInterval = 30
+
     /// Install the companion under startLock. A close() that raced the
     /// resolver wins: the freshly built companion is closed instead of
     /// stored, so no ingest loop or URLSession can outlive the parent.
@@ -92,8 +167,13 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         if raceClosed { companion.close() }
     }
 
-    public init(playlistURL: URL) {
+    public convenience init(playlistURL: URL) {
+        self.init(playlistURL: playlistURL, role: .mainVideo)
+    }
+
+    init(playlistURL: URL, role: Role) {
         self.playlistURL = playlistURL
+        self.role = role
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 30
@@ -137,6 +217,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         // alive past teardown. close() is idempotent on the companion.
         companion?.close()
         fifo.cancel()
+        // A resolveSegmentFormatHint() racing this close must not sleep
+        // out its full bound: if the ingest never started it would
+        // otherwise have no waker (runIngest's defer covers the started
+        // case). Idempotent.
+        wakeFormatResolveWaiters()
         if !wasStarted {
             // Ingest never launched: we are the sole owner of the session.
             session.invalidateAndCancel()
@@ -171,7 +256,13 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     }
 
     private func runIngest() async {
-        defer { session.invalidateAndCancel() }
+        defer {
+            session.invalidateAndCancel()
+            // Whatever path the ingest exits on (clean EOF, terminal
+            // error, cancellation), a pending format resolve must wake;
+            // the hint is whatever was (or wasn't) published by then.
+            wakeFormatResolveWaiters()
+        }
         do {
             let (mediaURL, seedPlaylist) = try await resolveMediaPlaylistURL()
             var tracker = HLSPlaylistTracker()
@@ -233,9 +324,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     if bytes.isEmpty { continue } // 404: slid out of the window
                     if !sniffedFirstSegment {
                         sniffedFirstSegment = true
-                        guard bytes.first == 0x47 else {
-                            throw HLSIngestError.unsupportedSegmentFormat
-                        }
+                        try classifyFirstSegment(bytes)
                     }
                     guard fifo.write(bytes) else { return } // closed underneath us
                 }
@@ -262,6 +351,82 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             EngineLog.emit("[HLSIngest] terminal (transport): \(error.localizedDescription)", category: .engine)
             fifo.cancel()
         }
+    }
+
+    /// First-segment format gate, role-aware. Runs BEFORE the segment's
+    /// first byte is written to the FIFO, which is what gives the
+    /// format hint and the PRIV timestamp their publish-before-data
+    /// ordering contract.
+    ///
+    /// Main variant: strict MPEG-TS, exactly the previous behaviour.
+    ///
+    /// Companion audio rendition: TS passes through unchanged ("mpegts"
+    /// hint, no offset, timestamps already on the program clock). Apple
+    /// packed audio (ID3v2-prefixed raw ADTS AAC) resolves to FFmpeg's
+    /// "aac" demuxer and MUST carry the Apple PRIV program-clock
+    /// timestamp; without it the side audio cannot be aligned to the
+    /// video and guessing risks silent A/V desync, so the ingest goes
+    /// terminal with `demuxedAudioNotSupported` (host falls back to the
+    /// server-muxed route). A bare-ADTS first segment (no ID3 tag) is
+    /// the same situation: the spec requires the tag on every segment,
+    /// and without it there is no timestamp to anchor on.
+    private func classifyFirstSegment(_ bytes: Data) throws {
+        let format = LiveSegmentFormat.classify(bytes)
+        switch role {
+        case .mainVideo:
+            guard format == .mpegts else {
+                throw HLSIngestError.unsupportedSegmentFormat
+            }
+            publishSegmentFormat(hint: "mpegts", packedOffset90k: nil)
+        case .companionAudio:
+            switch format {
+            case .mpegts:
+                publishSegmentFormat(hint: "mpegts", packedOffset90k: nil)
+            case .id3PackedAudio:
+                guard let offset = PackedAudioID3.transportStreamTimestamp90k(in: bytes) else {
+                    EngineLog.emit(
+                        "[HLSIngest] packed-audio companion: first segment has no parsable "
+                        + "\"\(PackedAudioID3.appleTimestampOwner)\" PRIV timestamp; cannot "
+                        + "align to the program clock, failing fast for host fallback",
+                        category: .engine
+                    )
+                    throw HLSIngestError.demuxedAudioNotSupported
+                }
+                EngineLog.emit(
+                    "[HLSIngest] packed-audio companion: ADTS AAC with ID3 PRIV timestamp "
+                    + "\(offset) (90 kHz, \(String(format: "%.3f", Double(offset) / 90000.0))s)",
+                    category: .engine
+                )
+                publishSegmentFormat(hint: "aac", packedOffset90k: offset)
+            case .adtsAAC:
+                EngineLog.emit(
+                    "[HLSIngest] packed-audio companion: raw ADTS first segment without the "
+                    + "spec-required leading ID3 tag, no program-clock timestamp to align on; "
+                    + "failing fast for host fallback",
+                    category: .engine
+                )
+                throw HLSIngestError.demuxedAudioNotSupported
+            case nil:
+                throw HLSIngestError.unsupportedSegmentFormat
+            }
+        }
+    }
+
+    /// Publish the classification under startLock (ordering contract),
+    /// then wake a pending `resolveSegmentFormatHint`.
+    private func publishSegmentFormat(hint: String, packedOffset90k: Int64?) {
+        startLock.withLock {
+            _segmentFormatHint = hint
+            _packedAudioTimestampOffset90k = packedOffset90k
+        }
+        wakeFormatResolveWaiters()
+    }
+
+    private func wakeFormatResolveWaiters() {
+        formatCondition.lock()
+        formatResolved = true
+        formatCondition.broadcast()
+        formatCondition.unlock()
     }
 
     /// Resolves the media playlist URL and returns the already-parsed
@@ -312,8 +477,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 )
                 // Audio rendition playlists are direct media playlists;
                 // the companion's own resolveMediaPlaylistURL handles that
-                // case. Lazy: ingest starts on the companion's first read().
-                installCompanion(HLSLiveIngestReader(playlistURL: audioURL))
+                // case. Lazy: ingest starts on the companion's first read()
+                // (or on the engine's resolveSegmentFormatHint, whichever
+                // comes first). The companion role relaxes the first-
+                // segment sniff to also accept Apple packed audio.
+                installCompanion(HLSLiveIngestReader(playlistURL: audioURL, role: .companionAudio))
             }
             EngineLog.emit("[HLSIngest] master playlist: picked variant bandwidth=\(best.bandwidth)", category: .engine)
             return (url, nil)

@@ -178,6 +178,42 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Freed in the pump's exit path when the loop breaks between fills.
     private var mergeMainLookahead: UnsafeMutablePointer<AVPacket>?
     private var mergeSideLookahead: UnsafeMutablePointer<AVPacket>?
+
+    /// Synthesized timestamp clock for PACKED side audio (Apple HLS
+    /// packed audio: raw ADTS AAC rendition). FFmpeg's raw "aac"
+    /// demuxer puts the stream on its own zero-based clock and never
+    /// sees Apple's ID3 PRIV program-clock anchor, so its timestamps
+    /// would break the DTS merge ordering and strand the audio gate in
+    /// the wrong clock domain. Instead the clock starts at the PRIV
+    /// timestamp (rescaled into the side stream's time base by the
+    /// engine) and advances by each packet's duration, putting the
+    /// synthesized pts/dts on the same 90 kHz program clock as the
+    /// video, exactly like a TS companion's real timestamps. Pulled out
+    /// as a struct so the accumulation is unit-testable.
+    struct PackedAudioSynthClock {
+        /// Next pts/dts to stamp, in the side audio stream's time base.
+        private(set) var nextPts: Int64
+        /// Advance for packets whose demuxer duration is missing or
+        /// zero: one AAC frame (1024 samples) in the stream time base,
+        /// computed by the engine from the stream's sample rate.
+        let fallbackDurationPts: Int64
+
+        init(startPts: Int64, fallbackDurationPts: Int64) {
+            self.nextPts = startPts
+            self.fallbackDurationPts = max(1, fallbackDurationPts)
+        }
+
+        /// Timestamp for the current packet; advances the clock by the
+        /// packet's own duration when valid, else by the fallback.
+        mutating func stamp(packetDuration: Int64) -> Int64 {
+            let pts = nextPts
+            nextPts += packetDuration > 0 ? packetDuration : fallbackDurationPts
+            return pts
+        }
+    }
+
+    /// Non-nil only for packed side-audio sessions (see the struct doc).
+    private var packedSideAudioClock: PackedAudioSynthClock?
     /// EOF latches per merge source. The first EOF on EITHER source ends
     /// the merged stream: a healthy live rendition never EOFs, and
     /// draining the survivor alone would produce a silent (or frozen)
@@ -778,10 +814,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
         desiredFirstVideoTfdtPts: Int64,
         desiredFirstAudioTfdtPts: Int64 = 0,
         segmentBoundaries: [Int64],
-        isLive: Bool = false
+        isLive: Bool = false,
+        packedSideAudioStartPts: Int64? = nil,
+        packedSideAudioFallbackDurationPts: Int64 = 0
     ) throws {
         self.demuxer = demuxer
         self.sideAudioDemuxer = sideAudioDemuxer
+        // Packed (raw ADTS) side audio: synthesize program-clock
+        // timestamps anchored at the segment's ID3 PRIV value. TS-side
+        // sessions (startPts nil) keep using the demuxer's real
+        // program-clock timestamps.
+        if let startPts = packedSideAudioStartPts {
+            self.packedSideAudioClock = PackedAudioSynthClock(
+                startPts: startPts,
+                fallbackDurationPts: packedSideAudioFallbackDurationPts
+            )
+        }
         self.videoStreamIndex = videoStreamIndex
         self.videoConfig = video
         self.audioConfig = audio
@@ -838,7 +886,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         let audioDesc = audio.map { a -> String in
             let mode = a.bridge != nil ? "bridge" : "stream-copy"
-            let origin = sideAudioDemuxer != nil ? " (side demuxer)" : ""
+            let origin: String
+            if packedSideAudioClock != nil {
+                origin = " (side demuxer, packed synth clock start=\(packedSideAudioStartPts ?? 0))"
+            } else if sideAudioDemuxer != nil {
+                origin = " (side demuxer)"
+            } else {
+                origin = ""
+            }
             return " audio=\(mode)\(origin) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den)"
         } ?? ""
         EngineLog.emit(
@@ -1278,7 +1333,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         if mergeSideLookahead == nil, !mergeSideEOF {
             mergeSideLookahead = try side.readPacket()
-            if mergeSideLookahead == nil { mergeSideEOF = true }
+            if mergeSideLookahead == nil {
+                mergeSideEOF = true
+            } else if packedSideAudioClock != nil, let pkt = mergeSideLookahead {
+                // Stamp synthesized program-clock timestamps at the
+                // lookahead fill, BEFORE the merge compares DTS, so
+                // ordering / NOPTS repair / gates / rebase / mux all see
+                // the same values a TS companion would deliver.
+                stampPackedSideAudio(pkt)
+            }
         }
         guard !mergeMainEOF, !mergeSideEOF,
               let main = mergeMainLookahead, let sidePkt = mergeSideLookahead else {
@@ -1308,6 +1371,33 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private static func mergeOrderingTicks(_ packet: UnsafeMutablePointer<AVPacket>) -> Int64 {
         if packet.pointee.dts != Int64.min { return packet.pointee.dts }
         return packet.pointee.pts
+    }
+
+    /// Overwrite a packed side-audio packet's timestamps with the
+    /// synthesized program clock. The raw "aac" demuxer's own values
+    /// (zero-based, its private 1/28224000 clock with no PRIV anchor)
+    /// are useless for the merge and the audio gate; the synth clock
+    /// puts the stream on the variant group's shared 90 kHz program
+    /// clock (rescaled into the side stream's time base), so everything
+    /// downstream of this point treats the session exactly like a
+    /// TS-companion one.
+    ///
+    /// KNOWN LIMITATION: if the VIDEO rebases on a live discontinuity,
+    /// this free-running clock does NOT jump with it; A/V sync is lost
+    /// from that boundary on (a loud warning fires at the video rebase
+    /// site). Packed-audio providers (ARD live) have no in-stream
+    /// discontinuities in practice, so this stays a documented edge
+    /// instead of carrying speculative re-anchor machinery.
+    private func stampPackedSideAudio(_ packet: UnsafeMutablePointer<AVPacket>) {
+        guard audioConfig.map({ packet.pointee.stream_index == $0.sourceStreamIndex }) ?? false,
+              var clock = packedSideAudioClock else { return }
+        let pts = clock.stamp(packetDuration: packet.pointee.duration)
+        packedSideAudioClock = clock
+        packet.pointee.pts = pts
+        packet.pointee.dts = pts
+        if packet.pointee.duration <= 0 {
+            packet.pointee.duration = clock.fallbackDurationPts
+        }
     }
 
     /// Free any unconsumed merge lookaheads. Called once from the
@@ -1533,6 +1623,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + "newShift=\(newShift) lastOutDts=\(lastOutputDts)",
                             category: .session
                         )
+                        if packedSideAudioClock != nil {
+                            // See stampPackedSideAudio: the synthesized
+                            // side-audio clock free-runs from the join
+                            // anchor and cannot follow this jump, so the
+                            // audio-side inherit below will never apply
+                            // (synth timestamps never leap). Expect A/V
+                            // desync from this boundary on. Packed-audio
+                            // providers have no in-stream discontinuities
+                            // in practice; this warning is the breadcrumb
+                            // if one ever does.
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] WARNING: live video rebase with a "
+                                + "packed-audio synth clock active; synthesized side-audio "
+                                + "timestamps do NOT follow the jump, A/V sync is lost from "
+                                + "this boundary on",
+                                category: .session
+                            )
+                        }
                         let videoDeltaTicks = newShift - videoShiftPts
                         videoShiftPts = newShift
                         // dts-1 so the monotonic gate below is a no-op for this
