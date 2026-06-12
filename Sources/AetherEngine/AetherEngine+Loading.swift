@@ -208,6 +208,12 @@ extension AetherEngine {
         // HLSVideoEngine derives the playlist shaping (blocking-reload
         // eligibility, TARGETDURATION floor) from the hint itself.
         let liveSourceCadenceHint = (customReader as? LiveIngestSourceInfo)?.upstreamTargetDuration
+        // Demuxed-audio companion (same ordering guarantee as the cadence
+        // hint: installed by the reader's resolver before any main-stream
+        // byte flowed, so it is final by the time the probe returned).
+        // HLSVideoEngine opens a side demuxer over it when the main
+        // demuxer has no audio stream; nil means muxed audio as before.
+        let companionAudioReader = (customReader as? LiveIngestSourceInfo)?.companionAudioReader
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
@@ -222,7 +228,8 @@ extension AetherEngine {
             dvrWindowSeconds: dvrWindowSeconds,
             liveSourceCadenceHint: liveSourceCadenceHint,
             preopenedDemuxer: preopenedDemuxer,
-            sourceReopenableByURL: !isCustomSource
+            sourceReopenableByURL: !isCustomSource,
+            companionAudioReader: companionAudioReader
         )
         session.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }

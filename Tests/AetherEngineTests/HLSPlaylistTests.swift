@@ -76,6 +76,58 @@ final class HLSPlaylistTests: XCTestCase {
         XCTAssertEqual(master.variants[0].audioGroupID, "aac")
     }
 
+    func testExtractsAudioRenditions() throws {
+        // The companion-reader path needs the renditions themselves
+        // (groupID + uri + DEFAULT flag), not just the group IDs.
+        let text = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Klare Sprache",DEFAULT=NO,URI="audio/ks/index.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Deutsch",DEFAULT=YES,URI="audio/de/index.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=8500800,RESOLUTION=1920x1080,AUDIO="aac"
+        video/high.m3u8
+        """
+        guard case .master(let master) = try HLSPlaylistParser.parse(text) else {
+            return XCTFail("expected master playlist")
+        }
+        XCTAssertEqual(master.audioRenditions.count, 2)
+        XCTAssertEqual(master.audioRenditions[0].groupID, "aac")
+        XCTAssertEqual(master.audioRenditions[0].uri, "audio/ks/index.m3u8")
+        XCTAssertFalse(master.audioRenditions[0].isDefault)
+        XCTAssertEqual(master.audioRenditions[1].uri, "audio/de/index.m3u8")
+        XCTAssertTrue(master.audioRenditions[1].isDefault)
+        // DEFAULT=YES preference: the reader picks the default rendition
+        // of the variant's group even when it is not listed first.
+        let group = master.audioRenditions.filter { $0.groupID == "aac" }
+        XCTAssertEqual(
+            (group.first(where: { $0.isDefault }) ?? group.first)?.uri,
+            "audio/de/index.m3u8"
+        )
+    }
+
+    func testAudioRenditionWithoutDefaultFallsBackToFirst() throws {
+        // No DEFAULT=YES anywhere in the group: the reader's pick falls
+        // back to the first URI-carrying rendition.
+        let text = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Deutsch",URI="audio/de/index.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",URI="audio/en/index.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=2500000,AUDIO="aac"
+        video/mid.m3u8
+        """
+        guard case .master(let master) = try HLSPlaylistParser.parse(text) else {
+            return XCTFail("expected master playlist")
+        }
+        XCTAssertEqual(master.audioRenditions.map(\.isDefault), [false, false])
+        let group = master.audioRenditions.filter { $0.groupID == "aac" }
+        XCTAssertEqual(
+            (group.first(where: { $0.isDefault }) ?? group.first)?.uri,
+            "audio/de/index.m3u8"
+        )
+        // Group set stays consistent with the renditions (stable API the
+        // reader's membership check uses).
+        XCTAssertEqual(master.demuxedAudioGroupIDs, ["aac"])
+    }
+
     func testInBandAudioRenditionIsNotDemuxed() throws {
         // EXT-X-MEDIA without URI means the audio is muxed into the
         // variant stream itself; that plays fine and must not trip the
@@ -90,6 +142,7 @@ final class HLSPlaylistTests: XCTestCase {
             return XCTFail("expected master playlist")
         }
         XCTAssertTrue(master.demuxedAudioGroupIDs.isEmpty)
+        XCTAssertTrue(master.audioRenditions.isEmpty)
         XCTAssertEqual(master.variants[0].audioGroupID, "aac")
     }
 

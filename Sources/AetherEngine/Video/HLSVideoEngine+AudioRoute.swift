@@ -288,7 +288,14 @@ extension HLSVideoEngine {
             }
         }
 
-        // Video-only fallback.
+        // Video-only fallback. NOT legal for a demuxed-audio session:
+        // the user-visible result would be exactly the silent playback
+        // the companion machinery exists to prevent, so fail the load
+        // instead and let the host fall back to the server-muxed route.
+        if sideAudioDemuxer != nil {
+            throw HLSVideoEngineError.openFailed(
+                reason: "demuxed-audio companion present but no audio pipeline could be built")
+        }
         self.savedAudioConfig = nil
         self.audioBridge = nil
         audioHLSCodecs = nil

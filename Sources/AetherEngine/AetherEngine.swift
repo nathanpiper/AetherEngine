@@ -1210,6 +1210,27 @@ public final class AetherEngine: ObservableObject {
         }
         EngineLog.emit("[AetherEngine] dispatch: codec=\(detectedCodecID.rawValue) → \(useSoftwarePath ? "software" : "native")", category: .engine)
 
+        // Demuxed-audio live ingest is a native-path-only feature: the
+        // side-demuxer merge lives in HLSSegmentProducer, while
+        // SoftwarePlaybackHost reads exactly one demuxer. A demuxed-audio
+        // source whose video codec routes software (e.g. an MPEG-2 TS
+        // rendition) would therefore play SILENT; fail fast instead so the
+        // host falls back to the server-muxed route, the same contract the
+        // reader's residual demuxedAudioNotSupported cases follow.
+        if useSoftwarePath, options.isLive,
+           (customReader as? LiveIngestSourceInfo)?.companionAudioReader != nil,
+           probe.audioStreamIndex < 0 {
+            probe.markClosed()
+            Task.detached { [probe] in probe.close() }
+            EngineLog.emit(
+                "[AetherEngine] demuxed-audio live source routed to the software path "
+                + "(codec=\(detectedCodecID.rawValue)); side-audio merge is native-only, failing fast",
+                category: .engine
+            )
+            state = .error("Demuxed-audio live source not supported on this codec path")
+            throw HLSIngestError.demuxedAudioNotSupported
+        }
+
         do {
             if useSoftwarePath {
                 // SW path now REUSES the probe demuxer (single open). Do not

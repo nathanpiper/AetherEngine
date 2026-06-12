@@ -20,9 +20,13 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible {
     case ingestStalled
     /// The selected variant references an alternate-audio group whose
     /// renditions live in a separate playlist (EXT-X-MEDIA:TYPE=AUDIO
-    /// with URI). Ingesting it would need a second loop + remux; until
-    /// that exists, failing fast at join time beats silently playing
-    /// video without sound (device repro: Das Erste HD via ARD's CDN).
+    /// with URI) in a shape the ingest still cannot handle. The common
+    /// shape (ARD-style demuxed audio, device repro: Das Erste HD via
+    /// ARD's CDN) IS supported via a companion reader + side demuxer;
+    /// this error remains for the residual cases (unresolvable
+    /// rendition URI, and the engine-side guard for demuxed audio on
+    /// the software video path). Failing fast at join time beats
+    /// silently playing video without sound.
     case demuxedAudioNotSupported
 
     public var description: String {

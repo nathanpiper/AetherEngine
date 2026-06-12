@@ -158,6 +158,33 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// The source demuxer the pump reads packets from. Owned by this
     /// producer for the session's lifetime.
     private let demuxer: Demuxer
+
+    /// Optional SECOND demuxer carrying the audio of a demuxed-audio
+    /// HLS ingest (video-only variant + separate audio rendition,
+    /// ARD-style). When non-nil, the pump pull-merges packets from both
+    /// demuxers by DTS (see `readNextSourcePacket`) and classifies audio
+    /// by ORIGIN instead of stream index: the side demuxer's stream
+    /// numbering is independent of the main demuxer's, so its audio
+    /// index can collide with the main video index. Owned by
+    /// HLSVideoEngine (which closes it in stop()); the producer only
+    /// reads from it. nil for every muxed-audio session, in which case
+    /// the pump behaves exactly as before.
+    private let sideAudioDemuxer: Demuxer?
+
+    /// One-packet lookahead per source for the dual-demuxer pull-merge.
+    /// `readNextSourcePacket` keeps both filled and yields the lower-DTS
+    /// one, so packets enter the (single) downstream pipeline in global
+    /// decode order even though they come from two independent FIFOs.
+    /// Freed in the pump's exit path when the loop breaks between fills.
+    private var mergeMainLookahead: UnsafeMutablePointer<AVPacket>?
+    private var mergeSideLookahead: UnsafeMutablePointer<AVPacket>?
+    /// EOF latches per merge source. The first EOF on EITHER source ends
+    /// the merged stream: a healthy live rendition never EOFs, and
+    /// draining the survivor alone would produce a silent (or frozen)
+    /// tail the engine cannot recover from. Ending the pump routes into
+    /// the same host-retune path as a main-source loss.
+    private var mergeMainEOF = false
+    private var mergeSideEOF = false
     private let videoStreamIndex: Int32
     private let videoOutputStreamIndex: Int32 = 0
     private let cache: SegmentCache
@@ -741,6 +768,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         videoStreamIndex: Int32,
         video: StreamConfig,
         audio: AudioConfig? = nil,
+        sideAudioDemuxer: Demuxer? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
         targetSegmentDurationSeconds: Double = 6.0,
@@ -753,6 +781,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         isLive: Bool = false
     ) throws {
         self.demuxer = demuxer
+        self.sideAudioDemuxer = sideAudioDemuxer
         self.videoStreamIndex = videoStreamIndex
         self.videoConfig = video
         self.audioConfig = audio
@@ -788,15 +817,29 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // packets for the secondary audio + every PGS subtitle bitmap
         // (large per-frame payloads) that we then `continue` out of
         // the pump anyway — pure heap churn.
-        var keep: Set<Int32> = [videoStreamIndex]
-        if let audio = audio {
-            keep.insert(audio.sourceStreamIndex)
+        //
+        // Dual-demuxer sessions split the keep sets: the audio config's
+        // sourceStreamIndex numbers a stream in the SIDE demuxer, not in
+        // the main one (it could alias an unrelated main stream), so the
+        // main demuxer keeps only video and the side demuxer keeps only
+        // its audio stream.
+        if let side = sideAudioDemuxer {
+            demuxer.discardAllStreamsExcept([videoStreamIndex])
+            if let audio = audio {
+                side.discardAllStreamsExcept([audio.sourceStreamIndex])
+            }
+        } else {
+            var keep: Set<Int32> = [videoStreamIndex]
+            if let audio = audio {
+                keep.insert(audio.sourceStreamIndex)
+            }
+            demuxer.discardAllStreamsExcept(keep)
         }
-        demuxer.discardAllStreamsExcept(keep)
 
         let audioDesc = audio.map { a -> String in
             let mode = a.bridge != nil ? "bridge" : "stream-copy"
-            return " audio=\(mode) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den)"
+            let origin = sideAudioDemuxer != nil ? " (side demuxer)" : ""
+            return " audio=\(mode)\(origin) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den)"
         } ?? ""
         EngineLog.emit(
             "[HLSSegmentProducer] init OK (baseIndex=\(baseIndex), "
@@ -1195,6 +1238,87 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return true
     }
 
+    // MARK: - Dual-source pull-merge
+
+    /// Where a merged packet came from. Classification in the pump keys
+    /// off this when a side demuxer is active (see `sideAudioDemuxer`).
+    private enum PacketOrigin { case main, side }
+
+    /// Next packet for the pump, in global decode order. Single-demuxer
+    /// sessions read the main demuxer directly (the pre-merge fast
+    /// path, byte-for-byte the old behaviour). Dual-demuxer sessions
+    /// keep one lookahead per source and yield the lower DTS first,
+    /// rescaled to a common clock via each stream's time_base (both are
+    /// MPEG-TS 1/90000 in practice, but the rescale keeps the merge
+    /// correct for any pairing).
+    ///
+    /// Blocking and pacing: each underlying read blocks until that
+    /// source's ingest FIFO has bytes. Holding one lookahead per source
+    /// means the pump only ever waits for whichever rendition is
+    /// BEHIND, which naturally paces both ingests to the live rate;
+    /// both renditions come off the same CDN clock, so neither can run
+    /// unboundedly ahead. A stall on either source stalls the pump the
+    /// same way a muxed-audio stall always has.
+    ///
+    /// EOF: the FIRST source to EOF ends the merged stream (nil), even
+    /// if the other still has a lookahead pending; see the latch docs.
+    /// The unconsumed lookahead is freed by the pump's exit path. Read
+    /// errors throw through unchanged so the pump exits with the same
+    /// `.readError` reason that triggers the host-retune path today.
+    private func readNextSourcePacket() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
+        guard let side = sideAudioDemuxer else {
+            guard let packet = try demuxer.readPacket() else { return nil }
+            return (packet, .main)
+        }
+        // Fill both lookaheads. Order matters for teardown: a stop()
+        // marks both demuxers closed, so neither read can block forever.
+        if mergeMainLookahead == nil, !mergeMainEOF {
+            mergeMainLookahead = try demuxer.readPacket()
+            if mergeMainLookahead == nil { mergeMainEOF = true }
+        }
+        if mergeSideLookahead == nil, !mergeSideEOF {
+            mergeSideLookahead = try side.readPacket()
+            if mergeSideLookahead == nil { mergeSideEOF = true }
+        }
+        guard !mergeMainEOF, !mergeSideEOF,
+              let main = mergeMainLookahead, let sidePkt = mergeSideLookahead else {
+            // Either source ended; the merged stream ends with it.
+            return nil
+        }
+        let sideTb = audioConfig?.sourceTimeBase ?? sourceVideoTimeBase
+        let sideFirst = DualSourceMergeOrder.sideFirst(
+            mainTicks: Self.mergeOrderingTicks(main),
+            mainTimeBase: sourceVideoTimeBase,
+            sideTicks: Self.mergeOrderingTicks(sidePkt),
+            sideTimeBase: sideTb
+        )
+        if sideFirst {
+            mergeSideLookahead = nil
+            return (sidePkt, .side)
+        }
+        mergeMainLookahead = nil
+        return (main, .main)
+    }
+
+    /// Ordering key for the merge: dts when valid, else pts. A packet
+    /// with NEITHER (rare demuxer glitch) keys to Int64.min so it is
+    /// yielded immediately instead of wedging the comparison; the
+    /// pump's NOPTS repair downstream handles it like any other
+    /// timestamp-less packet.
+    private static func mergeOrderingTicks(_ packet: UnsafeMutablePointer<AVPacket>) -> Int64 {
+        if packet.pointee.dts != Int64.min { return packet.pointee.dts }
+        return packet.pointee.pts
+    }
+
+    /// Free any unconsumed merge lookaheads. Called once from the
+    /// pump's exit path: the loop can break (stop / error / EOF latch)
+    /// between a fill and a yield, leaving up to one packet per source
+    /// in the lookahead slots.
+    private func freeMergeLookaheads() {
+        trackedPacketFree(&mergeMainLookahead)
+        trackedPacketFree(&mergeSideLookahead)
+    }
+
     // MARK: - Pump
 
     private func runPumpLoop() {
@@ -1216,8 +1340,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     break readLoop
                 }
 
-                guard let packet = try demuxer.readPacket() else {
-                    // EOF
+                guard let (packet, origin) = try readNextSourcePacket() else {
+                    // EOF (for dual-source sessions: EOF on EITHER source)
                     break readLoop
                 }
                 packetsRead += 1
@@ -1251,7 +1375,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // AVPlayer's decoder at the seam), and log loudly: the
                 // full fix (versioned init.mp4 + per-discontinuity
                 // EXT-X-MAP) is gated on a real-world repro channel.
-                if isLive, packet.pointee.stream_index == videoStreamIndex {
+                if isLive, origin == .main, packet.pointee.stream_index == videoStreamIndex {
                     var sdSize: Int = 0
                     if let sd = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &sdSize),
                        sdSize > 0 {
@@ -1302,8 +1426,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // seek had happened). `lastValidDts + 1` keeps the
                 // packet flowing without violating monotonicity; the
                 // next packet with a real dts re-anchors.
-                let isVideoPkt = (pktStreamIdx == videoStreamIndex)
-                let isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
+                // Classification is ORIGIN-aware when a side demuxer is
+                // active: the two demuxers number their streams
+                // independently, so the side audio's sourceStreamIndex can
+                // alias an unrelated main-demuxer stream (typically the
+                // video at index 0). Side packets are audio iff they carry
+                // the configured stream; main packets can never be audio in
+                // a dual-source session (the main variant is video-only).
+                // Single-demuxer sessions keep the original index checks.
+                let isVideoPkt = origin == .main && (pktStreamIdx == videoStreamIndex)
+                let isAudioPkt: Bool
+                if sideAudioDemuxer != nil {
+                    isAudioPkt = origin == .side
+                        && (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex } ?? false)
+                } else {
+                    isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
+                }
                 if packet.pointee.dts == Int64.min {
                     let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
                                       : isAudioPkt ? lastAudioSourceDts
@@ -2125,8 +2263,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // packets with the encoder's own duration set
                 // correctly, so it bypasses the look-behind. Stream-
                 // copy audio gets the same look-behind treatment as
-                // video.
-                if let audio = audioConfig, pktStreamIdx == audio.sourceStreamIndex {
+                // video. Gated on the origin-aware isAudioPkt (not a
+                // raw index compare) so a dual-source session can't
+                // route an aliasing main-stream index here.
+                if let audio = audioConfig, isAudioPkt {
                     if let bridge = audio.bridge {
                         let flacPackets: [UnsafeMutablePointer<AVPacket>]
                         do {
@@ -2243,6 +2383,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             stateLock.unlock()
             if stopped { exitReason = .stopRequested }
         }
+
+        // Dual-source sessions: drop any unconsumed merge lookaheads
+        // (the loop can break between a fill and a yield).
+        freeMergeLookaheads()
 
         // Flush look-behind pending packets. No successor packet
         // available so duration is set from the fallback (computed
@@ -2427,4 +2571,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
         trackedPacketFree(&pkt)
     }
 
+}
+
+/// Pure DTS ordering for the producer's dual-source pull-merge. Pulled
+/// out of the pump so the decision is unit-testable without demuxers:
+/// given the two lookahead packets' ordering ticks and time bases,
+/// decide whether the SIDE (audio rendition) packet is yielded before
+/// the MAIN (video variant) packet.
+enum DualSourceMergeOrder {
+
+    /// Compare in a 1/1000000 common clock (microseconds), the same
+    /// rescale convention `av_rescale_q` uses for cross-timebase
+    /// comparisons elsewhere in the engine. Both live HLS renditions
+    /// are MPEG-TS 1/90000 in practice, where the rescale is exact;
+    /// for any other pairing the rounding error is sub-microsecond,
+    /// far below frame spacing.
+    ///
+    /// Ties yield MAIN first: at equal timestamps the video packet
+    /// should lead the interleave (the muxer's segment cut decisions
+    /// key off video keyframes, and a video-first tie matches how
+    /// libavformat interleaves a muxed TS).
+    static func sideFirst(
+        mainTicks: Int64,
+        mainTimeBase: AVRational,
+        sideTicks: Int64,
+        sideTimeBase: AVRational
+    ) -> Bool {
+        // Int64.min is the "no timestamp" key (see mergeOrderingTicks):
+        // yield such a packet immediately rather than rescaling NOPTS.
+        if sideTicks == Int64.min { return true }
+        if mainTicks == Int64.min { return false }
+        let micro = AVRational(num: 1, den: 1_000_000)
+        let mainUs = av_rescale_q(mainTicks, mainTimeBase, micro)
+        let sideUs = av_rescale_q(sideTicks, sideTimeBase, micro)
+        return sideUs < mainUs
+    }
 }

@@ -109,6 +109,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?
 
+    /// Side demuxer over a demuxed-audio companion reader (live HLS
+    /// ingest whose variant is video-only with a separate audio
+    /// rendition playlist). Opened in `start()` when the main demuxer
+    /// found no audio stream and the source exposes a companion;
+    /// otherwise nil and every path below behaves exactly as before.
+    /// Engine-owned: `stop()` marks it closed synchronously (unblocks a
+    /// pump parked in its read) and closes it in the detached cleanup,
+    /// mirroring the main demuxer's teardown. Guarded by `restartLock`
+    /// like the other subsystem refs.
+    var sideAudioDemuxer: Demuxer?
+
     /// Captured at `start()` so the restart path can spin up a fresh
     /// producer at any segment index without re-running the full
     /// DV-classification / codec-pick logic.
@@ -441,7 +452,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         dvrWindowSeconds: Double? = nil,
         liveSourceCadenceHint: Double? = nil,
         preopenedDemuxer: Demuxer? = nil,
-        sourceReopenableByURL: Bool = true
+        sourceReopenableByURL: Bool = true,
+        companionAudioReader: IOReader? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
@@ -470,6 +482,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.liveTargetDurationFloorSeconds = liveSourceCadenceHint.map { ceil($0) }
         self.preopenedDemuxer = preopenedDemuxer
         self.sourceReopenableByURL = sourceReopenableByURL
+        self.companionAudioReader = companionAudioReader
     }
 
     /// Whether this engine is serving an unbounded (live) source. Set
@@ -496,6 +509,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// session (the upstream playlist's EXT-X-TARGETDURATION, via
     /// `LiveIngestSourceInfo`). nil for URL live sources and VOD.
     private let liveSourceCadenceHint: Double?
+
+    /// Forward-only reader carrying the source's DEMUXED audio
+    /// rendition (live HLS ingest, `LiveIngestSourceInfo.
+    /// companionAudioReader`). When the main demuxer finds no audio
+    /// stream and this is non-nil, `start()` opens `sideAudioDemuxer`
+    /// over it and the audio pipeline runs against that demuxer's
+    /// codecpar. The reader itself is owned by the host's main reader
+    /// (its close() closes the companion); the engine only owns the
+    /// side DEMUXER built on top. nil everywhere else.
+    private let companionAudioReader: IOReader?
 
     /// Whether the local live playlist may advertise LL-HLS blocking
     /// reload (CAN-BLOCK-RELOAD). Derived once in init from
@@ -854,6 +877,46 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }()
         self.videoFallbackDurationPts = videoFallbackDuration
 
+        // 6a-pre. Demuxed-audio companion (live HLS ingest). When the
+        //     main variant is video-only and the source carries its
+        //     audio in a separate rendition playlist, open a SIDE
+        //     demuxer over the companion reader (same custom-AVIO
+        //     mechanism, the rendition is MPEG-TS like the main stream)
+        //     and run the whole audio pipeline below against ITS audio
+        //     stream. The open blocks on the companion's first segment
+        //     bytes (the companion ingest is lazy and starts on this
+        //     first read), the same way the main probe blocked on the
+        //     main reader. Any failure here fails the LOAD: shipping a
+        //     silently video-only session is exactly the failure mode
+        //     the old fail-fast existed to prevent, and a thrown start()
+        //     sends the host down its server-muxed fallback route.
+        let audioDem: Demuxer
+        if isLiveSession, dem.audioStreamIndex < 0, let companion = companionAudioReader {
+            let side = Demuxer()
+            do {
+                try side.open(reader: companion, formatHint: "mpegts", isLive: true)
+            } catch {
+                throw HLSVideoEngineError.openFailed(
+                    reason: "demuxed-audio companion open failed (\(error))")
+            }
+            guard side.audioStreamIndex >= 0 else {
+                side.close()
+                throw HLSVideoEngineError.openFailed(
+                    reason: "demuxed-audio companion has no audio stream")
+            }
+            restartLock.lock()
+            sideAudioDemuxer = side
+            restartLock.unlock()
+            audioDem = side
+            EngineLog.emit(
+                "[HLSVideoEngine] demuxed-audio companion opened: side demuxer "
+                + "audioStreamIndex=\(side.audioStreamIndex)",
+                category: .session
+            )
+        } else {
+            audioDem = dem
+        }
+
         // 6a. Pick the audio routing: stream-copy for codecs legal in
         //     fMP4, FLAC bridge for those that aren't, drop for the
         //     unsupported tail. The fallback cascade tries stream-copy
@@ -861,17 +924,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //     Atmos JOC); if the muxer rejects the header (EAC3 from
         //     MKV without a parsed `dec3` extradata is the typical
         //     EINVAL), we retry with the FLAC bridge; if that also
-        //     fails we ship video-only.
+        //     fails we ship video-only (demuxed-audio sessions instead
+        //     fail the load, see buildProducerWithAudioCascade).
         //
         // Source selection: caller can override the auto-picked stream
         // (host-driven audio track switching). Override is validated
         // against the container; an invalid index logs and falls back
         // to libavformat's pick so a stale picker selection from a
-        // previous title can't strand playback without audio.
-        let autoAudioStreamIndex = dem.audioStreamIndex
+        // previous title can't strand playback without audio. All
+        // audio-side reads go through `audioDem`, which is the side
+        // demuxer for demuxed-audio sessions and `dem` otherwise.
+        let autoAudioStreamIndex = audioDem.audioStreamIndex
         let audioStreamIndex: Int32
         if let override = audioSourceStreamIndexOverride {
-            if Self.isAudioStream(demuxer: dem, index: override) {
+            if Self.isAudioStream(demuxer: audioDem, index: override) {
                 audioStreamIndex = override
                 EngineLog.emit(
                     "[HLSVideoEngine] audio: override accepted, sourceStreamIndex=\(override) (auto would have picked \(autoAudioStreamIndex))",
@@ -891,7 +957,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         var bridgePreferred = false
         var audioHLSCodecs: String?
 
-        if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
+        if audioStreamIndex >= 0, let audioStream = audioDem.stream(at: audioStreamIndex) {
             let codecID = audioStream.pointee.codecpar.pointee.codec_id
             // A live MPEG-TS probe can return an AAC stream with EMPTY
             // codec parameters: find_stream_info gave up before decoding
@@ -1076,7 +1142,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             preferBridge: bridgePreferred,
             streamCopyAudio: streamCopyAudio,
             sourceAudioStreamIndex: audioStreamIndex,
-            sourceAudioStream: audioStreamIndex >= 0 ? dem.stream(at: audioStreamIndex) : nil,
+            sourceAudioStream: audioStreamIndex >= 0 ? audioDem.stream(at: audioStreamIndex) : nil,
             audioHLSCodecs: &audioHLSCodecs
         )
         self.producer = prod
@@ -1455,6 +1521,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         audioBridge = nil
         let d = demuxer
         demuxer = nil
+        // Demuxed-audio side demuxer rides the exact same teardown as
+        // the main demuxer: synchronous markClosed below so a pump
+        // parked in its read unblocks immediately, close in the
+        // detached cleanup after waitForFinish.
+        let sd = sideAudioDemuxer
+        sideAudioDemuxer = nil
         // Pick up the preopened Demuxer if start() never consumed it
         // (e.g. an exception path before start()). Closing both d and
         // preopened is safe: when start() ran, preopened was set to
@@ -1502,6 +1574,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // session on the shared engine. markClosed is lock-free and
         // idempotent; the detached close() still frees the resources.
         d?.markClosed()
+        sd?.markClosed()
         preopened?.markClosed()
 
         // Detached cleanup. The closure captures the local resource
@@ -1516,6 +1589,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             c?.close()
             ab?.close()
             d?.close()
+            sd?.close()
             preopened?.close()
             // Release the owned codecpar copies last: the pump (now
             // finished or abandoned) read them via the saved configs.
@@ -1624,6 +1698,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoStreamIndex: videoStreamIndex,
             video: cfg,
             audio: savedAudioConfig,
+            sideAudioDemuxer: sideAudioDemuxer,
             cache: cache,
             baseIndex: baseIndex,
             targetSegmentDurationSeconds: Self.targetSegmentDuration,
