@@ -71,6 +71,20 @@ final class NativeAVPlayerHost {
     /// format. Sampling at readyToPlay was premature and false-positived
     /// the downmix warning on stereo-idle sinks (issue #24).
     private var didSampleSettledRoute = false
+    /// Latched transport intent: true after `play()`, false after
+    /// `pause()` / `setRate(0)` / item unload. Exists because a reload
+    /// on a REUSED AVPlayer (keepNativeHost) swaps items via
+    /// `replaceCurrentItem(nil)` + `replaceCurrentItem(item)`, and a
+    /// `play()` issued into that swap window can be swallowed:
+    /// AVPlayer reports `waitingToPlay reason=NoItemToPlay`, drops the
+    /// rate back to 0, and then sits at `readyToPlay` + `.paused`
+    /// forever (live-rejoin repro via `aetherctl live --reload-test`:
+    /// the rejoined item became ready but never played, and the
+    /// engine's timeControlStatus reconciliation then mislabeled the
+    /// session as user-paused). The readyToPlay observer re-asserts
+    /// this intent instead of trusting the one-shot `play()` call
+    /// (latch over racing the swap, per the binary-lockout pattern).
+    private var playIntent = false
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     /// Observes `playerLayer.isReadyForDisplay`, the only signal for
@@ -342,6 +356,20 @@ final class NativeAVPlayerHost {
                 case .readyToPlay:
                     self.duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
                     self.isReady = true
+                    // Re-assert a play() that the replaceCurrentItem swap
+                    // swallowed (see `playIntent`). Only when the caller's
+                    // standing intent is "playing" AND AVPlayer actually
+                    // parked: a user pause between play() and readiness
+                    // cleared the latch, and a healthy startup is already
+                    // in waitingToPlay/playing so the guard no-ops.
+                    if self.playIntent, self.avPlayer.timeControlStatus == .paused {
+                        EngineLog.emit(
+                            "[NativeAVPlayerHost] #\(self.sessionID) readyToPlay with play intent "
+                            + "but player parked (swallowed play() during item swap); re-issuing play()",
+                            category: .engine
+                        )
+                        self.avPlayer.play()
+                    }
                 case .failed:
                     self.failureMessage = item.error?.localizedDescription ?? "AVPlayerItem failed (no description)"
                 default:
@@ -544,7 +572,16 @@ final class NativeAVPlayerHost {
         //
         // Live remote-HLS (nativeRemoteHLS) WANTS AVPlayer's natural live-
         // edge start, so it sets skipInitialSeek and we leave the position
-        // to AVPlayer. VOD / loopback (default) seeks to startPosition.
+        // to AVPlayer. Loopback live REJOINS (audio-switch reload,
+        // background-return reopen) set it too: their rebuilt playlist can
+        // present a multi-segment backlog (the upstream re-serves its
+        // buffer at I/O speed), and this pre-readiness zero-tolerance
+        // seek pointing at the backlog start, ~a window behind AVPlayer's
+        // own live-join target, is the prime suspect for a reloaded item
+        // that fetched every segment yet never reached readyToPlay
+        // (permanent waitingToPlay, frozen frame; tvOS 26 + Jellyfin live
+        // device repro). See LiveReloadPolicy.skipInitialSeek. VOD /
+        // initial loopback joins (default) seek to startPosition.
         if !skipInitialSeek {
             seek(to: startPosition ?? 0)
         }
@@ -576,6 +613,10 @@ final class NativeAVPlayerHost {
     }
 
     func play() {
+        // Record the standing intent FIRST so the readyToPlay observer
+        // can re-assert a play() that the replaceCurrentItem swap
+        // swallowed (see `playIntent`).
+        playIntent = true
         // AVPlayer with `automaticallyWaitsToMinimizeStalling=true`
         // (the default) handles "play before ready" correctly: it
         // sets rate=1, transitions to waitingToPlayAtSpecifiedRate,
@@ -590,6 +631,7 @@ final class NativeAVPlayerHost {
     }
 
     func pause() {
+        playIntent = false
         avPlayer.pause()
     }
 
@@ -611,6 +653,9 @@ final class NativeAVPlayerHost {
     }
 
     func setRate(_ value: Float) {
+        // Rate 0 is a pause; any other rate is a standing play intent
+        // (speed changes must survive the same swap window play() does).
+        playIntent = (value != 0)
         avPlayer.rate = value
     }
 
@@ -681,6 +726,12 @@ final class NativeAVPlayerHost {
         // restores the intended gate: the new item stays parked until the
         // explicit post-handshake `play()`. No-op on a cold load (rate is
         // already 0).
+        //
+        // The play-intent latch is session-scoped: clear it with the item
+        // so the PREVIOUS session's intent cannot re-start the next item
+        // at ITS readyToPlay, ahead of the engine's gated play() (that
+        // would re-open the issue-15 audio-leads-video window).
+        playIntent = false
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
         playerItem = nil
