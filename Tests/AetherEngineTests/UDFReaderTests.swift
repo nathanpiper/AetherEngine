@@ -55,4 +55,22 @@ final class UDFReaderTests: XCTestCase {
             guard case DiscError.notUDF = err else { return XCTFail("wrong error: \(err)") }
         }
     }
+
+    func test_truncatedImageThrowsNotTrap() throws {
+        // A valid UDF image truncated before its volume structure must throw,
+        // not trap. Build the full fixture then cut it to just past the AVDP.
+        func be16(_ v: Int) -> [UInt8] { [UInt8((v>>8)&0xff), UInt8(v&0xff)] }
+        func be32(_ v: Int) -> [UInt8] { [UInt8((v>>24)&0xff),UInt8((v>>16)&0xff),UInt8((v>>8)&0xff),UInt8(v&0xff)] }
+        var pi = Array("00001".utf8) + Array("M2TS".utf8) + be16(0) + [0] + be32(0) + be32(90000) + [UInt8](repeating:0,count:8)
+        var playlist = be32(0) + be16(0) + be16(1) + be16(0) + (be16(pi.count) + pi)
+        var mpls = Array("MPLS".utf8) + Array("0200".utf8) + be32(40) + be32(0)
+        mpls += [UInt8](repeating: 0, count: 40 - mpls.count) + playlist
+        var m2ts = [UInt8](); for _ in 0..<400 { m2ts += [0x00,0x00,0x00,0x00,0x47] + [UInt8](repeating:0x10,count:187) }
+        let full = UDFFixture.make(mplsBytes: mpls, m2tsBytes: m2ts)
+        let truncated = full.prefix(258 * 2048) // AVDP present (sector 256), VDS cut off
+        XCTAssertThrowsError(try {
+            let udf = try UDFReader(reader: DataIOReader(data: Data(truncated)))
+            _ = try udf.list(path: ["BDMV"])
+        }())
+    }
 }

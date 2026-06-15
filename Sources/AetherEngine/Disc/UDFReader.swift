@@ -94,7 +94,7 @@ final class UDFReader {
                 got += Int(n)
             }
         }
-        if got < ss { buf.removeLast(ss - got) }
+        guard got == ss else { throw DiscError.malformed("short read at sector \(s)") }
         return buf
     }
 
@@ -131,9 +131,12 @@ final class UDFReader {
         fsdBlock = u32(lvd, 252); fsdPartRef = u16(lvd, 256)
         // partition maps
         let nMaps = u32(lvd, 268)
+        let capMaps = min(nMaps, 64)
         var off = 440
-        for _ in 0..<nMaps {
+        for _ in 0..<capMaps {
+            guard off + 2 <= lvd.count else { break }
             let type = Int(lvd[off]); let len = Int(lvd[off+1])
+            guard len > 0, off + len <= lvd.count else { break }
             if type == 1 {
                 let pn = u16(lvd, off+4)
                 partMaps.append(PartMap(isMetadata: false, physicalPartNumber: pn, metadataFileBlock: 0))
@@ -224,12 +227,14 @@ final class UDFReader {
     private func readDirectory(block: Int, partRef: Int) throws -> [UDFEntry] {
         let fe = try readFileEntry(block: block, partRef: partRef)
         // Read all the directory's data bytes via its extents.
+        let maxDirBytes = 8 * 1024 * 1024
         var data = [UInt8]()
         for ext in fe.allocationExtents {
             let sector = try resolve(block: ext.block, partRef: extentPartRef(for: fe, ad: ext))
             var remaining = ext.length
             var s = sector
             while remaining > 0 {
+                guard data.count < maxDirBytes else { throw DiscError.malformed("directory too large") }
                 let chunk = try readSector(s)
                 data += chunk.prefix(min(remaining, ss))
                 remaining -= min(remaining, ss)
