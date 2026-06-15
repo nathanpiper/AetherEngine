@@ -207,7 +207,9 @@ extension HLSVideoEngine {
                     let prod = try makeProducer(baseIndex: 0)
                     if sourceIsAtmos {
                         EngineLog.emit(
-                            "[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact",
+                            "[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged; DD+/JOC bitstream "
+                            + "preserved for the downstream renderer (HDMI passthrough / AirPods spatial; "
+                            + "plain Bluetooth A2DP / LE downmixes natively)",
                             category: .session
                         )
                     }
@@ -223,14 +225,13 @@ extension HLSVideoEngine {
                     // Fall through to bridge attempt.
                 }
             }
-        } else if preferBridge && sourceIsAtmos && Self.currentRouteSupportsAtmosPassthrough() {
-            // Caller pre-decided bridge before reaching here. For Atmos
-            // that's wrong UNLESS the route can't carry Atmos at all
-            // (Bluetooth A2DP / LE), in which case the cascade setup
-            // intentionally forced the bridge and already logged a
-            // route-specific message. The remaining case — pre-bridge
-            // on an Atmos-capable route — would silently degrade
-            // Atmos, so diagnose it explicitly.
+        } else if preferBridge && sourceIsAtmos {
+            // Caller pre-decided bridge before reaching here. For an
+            // Atmos source that is always wrong: EAC3+JOC stream-copies
+            // on every output route (AVPlayer downmixes or passes
+            // through downstream), so a pre-bridge can only have come
+            // from a codec-table mistake and would silently degrade
+            // Atmos. Diagnose it explicitly.
             EngineLog.emit(
                 "[HLSVideoEngine] WARNING: Atmos source pre-routed to FLAC bridge without stream-copy attempt — Atmos lost. Investigate the codec compatibility table.",
                 category: .session
