@@ -1690,6 +1690,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     lastSeenVideoExtradata = nil
                     pendingVideoProgramSwitch = true
                     pendingAdVideoConfig = adConfig
+                    // A program switch is active boundary work, not a wedge:
+                    // give the next cut a fresh watchdog window so the no-cut
+                    // stall doesn't trip mid-ad-pod and force a needless
+                    // server retune.
+                    if lastLiveSegmentFinalizeAt != nil { lastLiveSegmentFinalizeAt = Date() }
                     // (pendingDiscontinuityFlag / pendingForceCutFlag are
                     // set by the rebase that follows.)
                 }
@@ -2065,9 +2070,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // (dts <= pts is a hard invariant for the muxer).
                 // If both checks fail, drop the packet (loses one
                 // leading B-frame at most per CRA, acceptable).
+                // Small-glitch ceiling: this monotonic repair is for MKV
+                // B-frame reconstruction glitches (a few ticks backward). A
+                // LARGE backward jump is an SSAI ad-pod / program
+                // discontinuity (source clock reset); the timeline rebase
+                // handles the shift and the OutputTimestampSanitizer
+                // guarantees output monotonicity + pts>=dts at the muxer.
+                // Bumping/dropping a big jump here is what dropped ad-return
+                // frames (cutter wedge → reload) and bumped audio forward
+                // (dropouts + A/V drift). Let big jumps pass; only repair
+                // small ones.
+                let monoGlitchVideoTicks = sourceVideoTbSeconds > 0
+                    ? Int64(0.5 / sourceVideoTbSeconds) : Int64.max
                 if isVideoPkt, lastVideoSourceDts != Int64.min,
                    packet.pointee.dts != Int64.min,
-                   packet.pointee.dts <= lastVideoSourceDts {
+                   packet.pointee.dts <= lastVideoSourceDts,
+                   lastVideoSourceDts - packet.pointee.dts <= monoGlitchVideoTicks {
                     let original = packet.pointee.dts
                     let bumped = lastVideoSourceDts + 1
                     let ptsValid = packet.pointee.pts != Int64.min
@@ -2097,9 +2115,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         continue
                     }
                 }
+                let monoGlitchAudioTicks: Int64 = {
+                    let tb = audioConfig?.sourceTimeBase
+                    guard let tb, tb.num > 0, tb.den > 0 else { return monoGlitchVideoTicks }
+                    return Int64(0.5 * Double(tb.den) / Double(tb.num))
+                }()
                 if isAudioPkt, lastAudioSourceDts != Int64.min,
                    packet.pointee.dts != Int64.min,
-                   packet.pointee.dts <= lastAudioSourceDts {
+                   packet.pointee.dts <= lastAudioSourceDts,
+                   lastAudioSourceDts - packet.pointee.dts <= monoGlitchAudioTicks {
                     // Same logic for audio. Audio doesn't have B-frame
                     // pts/dts skew so dts <= pts isn't a useful gate;
                     // just bump.
