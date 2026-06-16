@@ -50,7 +50,8 @@ struct HLSPlaylistTracker {
             if markFirstDiscontinuity, !result.isEmpty {
                 let first = result[0]
                 result[0] = HLSMediaSegment(
-                    uri: first.uri, duration: first.duration, discontinuityBefore: true
+                    uri: first.uri, duration: first.duration,
+                    discontinuityBefore: true, crypt: first.crypt
                 )
             }
             return result

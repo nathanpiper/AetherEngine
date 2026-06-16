@@ -10,6 +10,7 @@ final class HLSPlaylistTrackerTests: XCTestCase {
             segments: uris.map { HLSMediaSegment(uri: $0, duration: duration, discontinuityBefore: false) },
             hasEndList: false,
             isEncrypted: false,
+            hasUnsupportedEncryption: false,
             hasMap: false
         )
     }

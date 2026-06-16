@@ -10,8 +10,16 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible {
     /// The response is not an HLS playlist (missing #EXTM3U) or is
     /// structurally unusable (no segments, no target duration).
     case playlistInvalid(reason: String)
-    /// EXT-X-KEY with METHOD != NONE. AES-128 is a later, evidence-gated phase.
+    /// EXT-X-KEY with an unsupported METHOD (SAMPLE-AES, SAMPLE-AES-CTR,
+    /// or an AES-128 tag with no URI). Plain METHOD=AES-128 is supported
+    /// inline (clear-key AES-CBC, see `HLSSegmentDecryptor`); only the
+    /// methods that need real DRM or sample-level handling fall back.
     case encryptedNotSupported
+    /// An AES-128 segment could not be decrypted: the key fetch failed or
+    /// CommonCrypto rejected the key/IV/ciphertext. Terminal so the host
+    /// falls back to the server-muxed route rather than feeding the
+    /// demuxer ciphertext.
+    case segmentDecryptFailed(reason: String)
     /// EXT-X-MAP present, or the first fetched segment is not in a
     /// format the reader's role accepts: the MAIN variant must start
     /// with the MPEG-TS sync byte 0x47, a companion AUDIO rendition may
@@ -41,6 +49,7 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible {
         case .playlistUnreachable(let status): "playlistUnreachable(\(status))"
         case .playlistInvalid(let reason): "playlistInvalid(\(reason))"
         case .encryptedNotSupported: "encryptedNotSupported"
+        case .segmentDecryptFailed(let reason): "segmentDecryptFailed(\(reason))"
         case .unsupportedSegmentFormat: "unsupportedSegmentFormat"
         case .ingestStalled: "ingestStalled"
         case .demuxedAudioNotSupported: "demuxedAudioNotSupported"

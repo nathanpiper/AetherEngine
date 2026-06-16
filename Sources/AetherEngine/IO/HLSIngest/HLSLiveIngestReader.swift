@@ -1,4 +1,5 @@
 import Foundation
+import CommonCrypto
 
 /// Live HLS ingest as a public `IOReader`: resolves the upstream playlist
 /// (master -> highest-BANDWIDTH variant), polls the media playlist, fetches
@@ -94,6 +95,15 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// resolve can never outwait a dead ingest.
     private let formatCondition = NSCondition()
     private var formatResolved = false
+
+    /// AES-128 clear-key cache, keyed by the EXT-X-KEY URI string. FAST
+    /// providers reuse one key across a whole clip (dozens of segments),
+    /// so this turns one key fetch per clip instead of one per segment.
+    /// Guarded by `keyCacheLock`; the lock is never held across the
+    /// network fetch (a duplicate concurrent miss just refetches the same
+    /// 16 bytes, harmless).
+    private let keyCacheLock = NSLock()
+    private var keyCache: [String: Data] = [:]
 
     /// Terminal ingest error, readable by the host for fallback logging.
     public var terminalError: HLSIngestError? {
@@ -267,6 +277,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             let (mediaURL, seedPlaylist) = try await resolveMediaPlaylistURL()
             var tracker = HLSPlaylistTracker()
             var sniffedFirstSegment = false
+            var loggedEncryptedDirectPlay = false
             var refreshInterval: Double = 2
             var pendingPlaylist: HLSMediaPlaylist? = seedPlaylist
 
@@ -294,7 +305,14 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                         _upstreamTargetDuration = media.targetDuration
                     }
                 }
-                if media.isEncrypted { throw HLSIngestError.encryptedNotSupported }
+                if media.hasUnsupportedEncryption { throw HLSIngestError.encryptedNotSupported }
+                if media.isEncrypted, !loggedEncryptedDirectPlay {
+                    loggedEncryptedDirectPlay = true
+                    EngineLog.emit(
+                        "[HLSIngest] AES-128 clear-key stream: decrypting segments inline (direct play)",
+                        category: .engine
+                    )
+                }
                 if media.hasMap { throw HLSIngestError.unsupportedSegmentFormat }
                 refreshInterval = min(6, max(1, media.targetDuration / 2))
 
@@ -320,8 +338,17 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     guard let segmentURL = HLSPlaylistParser.resolve(uri: segment.uri, against: mediaURL) else {
                         throw HLSIngestError.playlistInvalid(reason: "unresolvable segment URI")
                     }
-                    let bytes = try await fetchSegment(segmentURL)
-                    if bytes.isEmpty { continue } // 404: slid out of the window
+                    let fetched = try await fetchSegment(segmentURL)
+                    if fetched.isEmpty { continue } // 404: slid out of the window
+                    // Decrypt AES-128 clear-key segments inline before
+                    // classification (the TS sync byte is only visible in
+                    // the plaintext) and before the FIFO sees them.
+                    let bytes: Data
+                    if let crypt = segment.crypt {
+                        bytes = try await decryptSegment(fetched, crypt: crypt, against: mediaURL)
+                    } else {
+                        bytes = fetched
+                    }
                     if !sniffedFirstSegment {
                         sniffedFirstSegment = true
                         try classifyFirstSegment(bytes)
@@ -578,5 +605,40 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             }
         }
         throw HLSIngestError.playlistUnreachable(status: lastStatus)
+    }
+
+    /// Decrypt one AES-128 clear-key segment: resolve + fetch (cached)
+    /// the 16-byte key, then AES-CBC/PKCS7 the ciphertext. Any failure is
+    /// terminal (`segmentDecryptFailed`) so the host falls back rather
+    /// than feeding the demuxer ciphertext.
+    private func decryptSegment(_ ciphertext: Data, crypt: HLSSegmentCrypt, against base: URL) async throws -> Data {
+        guard let keyURL = HLSPlaylistParser.resolve(uri: crypt.keyURI, against: base) else {
+            throw HLSIngestError.segmentDecryptFailed(reason: "unresolvable key URI")
+        }
+        let key = try await fetchKey(keyURL)
+        guard let plaintext = HLSSegmentDecryptor.decryptAES128CBC(ciphertext, key: key, iv: crypt.iv) else {
+            throw HLSIngestError.segmentDecryptFailed(
+                reason: "AES-128-CBC failed (key=\(key.count)B iv=\(crypt.iv.count)B ct=\(ciphertext.count)B)"
+            )
+        }
+        return plaintext
+    }
+
+    /// Fetch a 16-byte AES-128 key, memoised by URI. The lock is dropped
+    /// across the network call; a racing miss just refetches the same key.
+    private func fetchKey(_ url: URL) async throws -> Data {
+        let cacheKey = url.absoluteString
+        if let cached = keyCacheLock.withLock({ keyCache[cacheKey] }) { return cached }
+
+        let (data, response) = try await session.data(from: url)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200..<300).contains(status) else {
+            throw HLSIngestError.segmentDecryptFailed(reason: "key fetch HTTP \(status)")
+        }
+        guard data.count == kCCKeySizeAES128 else {
+            throw HLSIngestError.segmentDecryptFailed(reason: "key length \(data.count) != 16")
+        }
+        keyCacheLock.withLock { keyCache[cacheKey] = data }
+        return data
     }
 }

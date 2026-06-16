@@ -37,12 +37,35 @@ struct HLSMasterPlaylist: Equatable {
     let audioRenditions: [HLSAudioRendition]
 }
 
+/// AES-128 segment encryption context resolved from the EXT-X-KEY tag
+/// that governs a segment. Only METHOD=AES-128 (full-segment AES-CBC,
+/// the standard clear-key HLS scheme Pluto/Samsung-TV+ and most FAST
+/// providers use) is modelled here; SAMPLE-AES and other methods are
+/// rejected at parse time (see `HLSMediaPlaylist.hasUnsupportedEncryption`).
+/// `iv` is always the final 16-byte initialisation vector: the explicit
+/// EXT-X-KEY IV attribute when present, otherwise the big-endian segment
+/// media-sequence number per RFC 8216 section 5.2.
+struct HLSSegmentCrypt: Equatable {
+    let keyURI: String
+    let iv: Data
+}
+
 /// One media segment of a media playlist.
 struct HLSMediaSegment: Equatable {
     let uri: String
     let duration: Double
     /// True when an EXT-X-DISCONTINUITY tag directly precedes this segment.
     let discontinuityBefore: Bool
+    /// AES-128 key context governing this segment, nil when the segment
+    /// is in the clear (no EXT-X-KEY or METHOD=NONE).
+    let crypt: HLSSegmentCrypt?
+
+    init(uri: String, duration: Double, discontinuityBefore: Bool, crypt: HLSSegmentCrypt? = nil) {
+        self.uri = uri
+        self.duration = duration
+        self.discontinuityBefore = discontinuityBefore
+        self.crypt = crypt
+    }
 }
 
 struct HLSMediaPlaylist: Equatable {
@@ -52,6 +75,11 @@ struct HLSMediaPlaylist: Equatable {
     let hasEndList: Bool
     /// Any EXT-X-KEY with METHOD != NONE anywhere in the playlist.
     let isEncrypted: Bool
+    /// Any EXT-X-KEY whose METHOD is neither NONE nor AES-128 (e.g.
+    /// SAMPLE-AES, SAMPLE-AES-CTR). AES-128 segments carry a per-segment
+    /// `crypt` and are decrypted inline; an unsupported method still
+    /// terminates the ingest so the host falls back.
+    let hasUnsupportedEncryption: Bool
     /// Any EXT-X-MAP tag (fMP4-segment playlist).
     let hasMap: Bool
 }
@@ -132,9 +160,16 @@ enum HLSPlaylistParser {
         var segments: [HLSMediaSegment] = []
         var hasEndList = false
         var isEncrypted = false
+        var hasUnsupportedEncryption = false
         var hasMap = false
         var pendingDuration: Double?
         var pendingDiscontinuity = false
+        // Active EXT-X-KEY state. AES-128 keys are "sticky": one tag
+        // governs every following segment until the next EXT-X-KEY
+        // (METHOD=NONE clears it). Pluto/Samsung-TV+ also emit one tag
+        // per segment with the same URI and an incrementing explicit IV.
+        var currentKeyURI: String?
+        var currentExplicitIV: Data?
 
         for line in lines {
             if line.hasPrefix("#EXT-X-TARGETDURATION:") {
@@ -148,16 +183,46 @@ enum HLSPlaylistParser {
                 pendingDiscontinuity = true
             } else if line.hasPrefix("#EXT-X-KEY:") {
                 let method = attribute("METHOD", in: line) ?? "NONE"
-                if method != "NONE" { isEncrypted = true }
+                switch method {
+                case "NONE":
+                    currentKeyURI = nil
+                    currentExplicitIV = nil
+                case "AES-128":
+                    isEncrypted = true
+                    currentKeyURI = attribute("URI", in: line)
+                    currentExplicitIV = attribute("IV", in: line).flatMap(parseHexIV)
+                    // A keyless AES-128 tag is unusable; treat as unsupported.
+                    if currentKeyURI == nil { hasUnsupportedEncryption = true }
+                default:
+                    // SAMPLE-AES / SAMPLE-AES-CTR / anything else: not decryptable here.
+                    isEncrypted = true
+                    hasUnsupportedEncryption = true
+                    currentKeyURI = nil
+                    currentExplicitIV = nil
+                }
             } else if line.hasPrefix("#EXT-X-MAP:") {
                 hasMap = true
             } else if line.hasPrefix("#EXT-X-ENDLIST") {
                 hasEndList = true
             } else if !line.hasPrefix("#") {
+                let crypt: HLSSegmentCrypt?
+                if let keyURI = currentKeyURI {
+                    // Explicit IV when the tag carried one, otherwise the
+                    // segment's media-sequence number as a 16-byte
+                    // big-endian value (RFC 8216 section 5.2).
+                    let sequence = mediaSequence + segments.count
+                    crypt = HLSSegmentCrypt(
+                        keyURI: keyURI,
+                        iv: currentExplicitIV ?? sequenceIV(sequence)
+                    )
+                } else {
+                    crypt = nil
+                }
                 segments.append(HLSMediaSegment(
                     uri: line,
                     duration: pendingDuration ?? targetDuration ?? 0,
-                    discontinuityBefore: pendingDiscontinuity
+                    discontinuityBefore: pendingDiscontinuity,
+                    crypt: crypt
                 ))
                 pendingDuration = nil
                 pendingDiscontinuity = false
@@ -175,8 +240,39 @@ enum HLSPlaylistParser {
             segments: segments,
             hasEndList: hasEndList,
             isEncrypted: isEncrypted,
+            hasUnsupportedEncryption: hasUnsupportedEncryption,
             hasMap: hasMap
         )
+    }
+
+    /// Parse a `0x`-prefixed hex EXT-X-KEY IV into a 16-byte big-endian
+    /// `Data`. Returns nil on a malformed length (caller falls back to
+    /// the sequence-number IV).
+    private static func parseHexIV(_ raw: String) -> Data? {
+        var hex = raw.trimmingCharacters(in: .whitespaces)
+        if hex.hasPrefix("0x") || hex.hasPrefix("0X") { hex = String(hex.dropFirst(2)) }
+        guard hex.count == 32 else { return nil }
+        var bytes = Data(capacity: 16)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            idx = next
+        }
+        return bytes
+    }
+
+    /// 16-byte big-endian IV from a segment media-sequence number, the
+    /// RFC 8216 default when an EXT-X-KEY carries no explicit IV.
+    private static func sequenceIV(_ sequence: Int) -> Data {
+        var iv = Data(repeating: 0, count: 16)
+        var value = UInt64(bitPattern: Int64(sequence))
+        for offset in 0..<8 {
+            iv[15 - offset] = UInt8(value & 0xFF)
+            value >>= 8
+        }
+        return iv
     }
 
     /// Extract a KEY=VALUE attribute from a tag line; tolerates quoted values.
