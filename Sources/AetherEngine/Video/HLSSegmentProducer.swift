@@ -357,22 +357,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// independently "one frame past its own last output" collapses each
     /// stream's gap separately, turning the asymmetry into a PERMANENT
     /// A/V offset for the rest of the program. The video rebase is the
-    /// master (mirroring the head-of-stream rule where audio inherits the
-    /// video's origin shift): when video rebases, the audio applies the
-    /// SAME timeline delta, rescaled into the audio time base.
+    /// master: when video rebases, the audio adopts the video's ABSOLUTE
+    /// shift (rescaled into the audio time base), NOT a relative delta.
+    /// Both streams are 90 kHz here, so an equal shift makes the output
+    /// A/V offset exactly the intrinsic source skew, every boundary,
+    /// independent of history. The earlier delta-based handoff
+    /// (audio += video's per-boundary delta) preserved whatever offset
+    /// already existed, so a sub-frame splice error at one creative was
+    /// carried into the next and ACCUMULATED across a long ad pod (audio
+    /// drifted further and further behind, the device symptom). Absolute
+    /// re-anchoring zeroes that: each boundary snaps audio back onto
+    /// video, and OutputTimestampSanitizer absorbs the lone sub-frame
+    /// output overlap at the seam.
     ///
-    /// `pendingAudioInheritDeltaTicks` is the video rebase delta waiting
-    /// for the audio stream's own boundary packet (video usually crosses
-    /// first; accumulated if a transient dts spike rebases and counter-
-    /// rebases before audio crosses). `lastIndependentAudioRebase`
-    /// records an audio rebase that fired BEFORE the video one (packet
-    /// interleave can deliver the first new-program audio packet early);
-    /// the subsequent video rebase then replaces the audio's measured
-    /// shift with the video-derived one via `pendingAudioShiftOverride`,
+    /// `pendingAudioInheritShift` is the video-derived absolute audio
+    /// shift waiting for the audio stream's own boundary packet (video
+    /// usually crosses first; a transient double-rebase just overwrites
+    /// it, latest video shift wins). `lastIndependentAudioRebase` records
+    /// an audio rebase that fired BEFORE the video one (packet interleave
+    /// can deliver the first new-program audio packet early); the
+    /// subsequent video rebase then replaces the audio's measured shift
+    /// with the video-derived absolute one via `pendingAudioShiftOverride`,
     /// applied at the next audio packet. All pairing state expires after
     /// `rebasePairingWindowSeconds` so a stale half-boundary can never
     /// poison a later, unrelated one.
-    private var pendingAudioInheritDelta: (ticksAudioTb: Int64, at: Date)? = nil
+    private var pendingAudioInheritShift: (shift: Int64, at: Date)? = nil
     private var lastIndependentAudioRebase: (preShift: Int64, at: Date)? = nil
     private var pendingAudioShiftOverride: (shift: Int64, at: Date)? = nil
     private static let rebasePairingWindowSeconds: TimeInterval = 5.0
@@ -1851,7 +1860,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 category: .session
                             )
                         }
-                        let videoDeltaTicks = newShift - videoShiftPts
                         videoShiftPts = newShift
                         // dts-1 so the monotonic gate below is a no-op for this
                         // packet; line ~1126 then sets lastValid = dts exactly.
@@ -1867,13 +1875,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         lastRawVideoPts = Int64.min
                         pendingDiscontinuityFlag = true
                         pendingForceCutFlag = true
-                        // Hand the SAME timeline delta to the audio stream
-                        // (rescaled), so both streams undergo one shared
-                        // transform and their true source-time relationship
-                        // survives the boundary. See the pairing-state docs.
+                        // Hand the video's ABSOLUTE shift to the audio stream
+                        // (rescaled), so both streams carry the identical
+                        // timeline transform and the output A/V offset is the
+                        // intrinsic source skew, re-anchored fresh at every
+                        // boundary (no cross-pod accumulation). See the
+                        // pairing-state docs.
                         if let audio = audioConfig {
-                            let deltaAudioTb = av_rescale_q(
-                                videoDeltaTicks,
+                            let videoDerivedAudioShift = av_rescale_q(
+                                videoShiftPts,
                                 sourceVideoTimeBase,
                                 audio.sourceTimeBase
                             )
@@ -1881,19 +1891,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                Date().timeIntervalSince(prior.at) < Self.rebasePairingWindowSeconds {
                                 // Audio crossed the boundary first (interleave)
                                 // and measured independently; replace its
-                                // measured shift with the video-derived one at
-                                // the next audio packet.
-                                pendingAudioShiftOverride = (prior.preShift + deltaAudioTb, Date())
+                                // measured shift with the video-derived absolute
+                                // one at the next audio packet.
+                                pendingAudioShiftOverride = (videoDerivedAudioShift, Date())
                                 lastIndependentAudioRebase = nil
                             } else {
-                                // Accumulate instead of overwrite: a transient
-                                // dts spike rebases and immediately counter-
-                                // rebases; the deltas sum to ~0, which is
-                                // exactly what audio should inherit.
-                                let accumulated = (pendingAudioInheritDelta
-                                    .map { Date().timeIntervalSince($0.at) < Self.rebasePairingWindowSeconds ? $0.ticksAudioTb : 0 }
-                                    ?? 0) + deltaAudioTb
-                                pendingAudioInheritDelta = (accumulated, Date())
+                                // Audio crosses after video (the common case):
+                                // stash the absolute target. A transient double-
+                                // rebase just overwrites it; the latest video
+                                // shift is the correct one to inherit.
+                                pendingAudioInheritShift = (videoDerivedAudioShift, Date())
                             }
                         }
                         // Deferred host-clock handoff: the shift describes
@@ -1947,9 +1954,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             - (lastOutputDts + max(audioFallbackDurationPts, 1))
                         var newShift = measuredShift
                         var inherited = false
-                        if let p = pendingAudioInheritDelta,
+                        if let p = pendingAudioInheritShift,
                            Date().timeIntervalSince(p.at) < Self.rebasePairingWindowSeconds {
-                            let candidate = audioShiftPts + p.ticksAudioTb
+                            // Absolute video-derived shift: snap audio onto
+                            // video, discarding any prior audio offset (that is
+                            // what stops the cross-pod accumulation).
+                            let candidate = p.shift
                             if let bridge = audio.bridge {
                                 // Bridge path: shifts never reach the encoder
                                 // timeline (the bridge re-stamps from its
@@ -1966,29 +1976,30 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 )
                                 inherited = true
                             } else {
-                                // Stream-copy: inherit the video rebase delta
-                                // so the A/V relationship survives the boundary.
-                                // Audio and video are both 90 kHz here, so the
-                                // video-derived shift keeps the two streams
-                                // sample-aligned EXACTLY. Apply it verbatim; do
+                                // Stream-copy: snap audio onto the video's
+                                // ABSOLUTE shift (candidate). Both streams are
+                                // 90 kHz, so an equal shift makes the output A/V
+                                // offset the intrinsic source skew, re-anchored
+                                // fresh at this boundary. Apply it verbatim; do
                                 // NOT clamp it to the last output dts. A genuine
                                 // SSAI splice changes the audio-vs-video start
-                                // skew by a sub-frame amount (Pluto content
-                                // leads by ~51 ms, the spliced ad by ~67 ms), so
-                                // the first rebased audio packet can land a few
-                                // ms before the last emitted one. The old clamp
-                                // absorbed that overlap by moving the ENTIRE
-                                // shift, which dragged every following packet
-                                // late and ACCUMULATED across creatives (audio
-                                // drifts later and later, the device symptom).
-                                // Keeping the sync-correct shift instead leaves
-                                // the lone overlapping boundary packet to
-                                // OutputTimestampSanitizer, which nudges just
-                                // that packet forward by a tick. Guard: a
-                                // physically implausible overlap (> 0.5 s, e.g.
-                                // a malformed reset) re-anchors so we never
-                                // compress a long audio region into 1-tick
-                                // spacing.
+                                // skew by a sub-frame amount (Pluto content leads
+                                // by ~51 ms, the spliced ad by ~67 ms) and the
+                                // audio buffer runs ~100 ms ahead of video, so
+                                // the first rebased audio packet lands a little
+                                // before the last emitted one. The old delta
+                                // handoff + clamp absorbed that by moving the
+                                // shift, which both dragged audio late AND
+                                // carried the error into the next creative, so it
+                                // ACCUMULATED across the ad pod (audio ended up
+                                // seconds behind by the time content returned:
+                                // the device symptom). Keeping the absolute shift
+                                // leaves the lone sub-frame output overlap at the
+                                // seam to OutputTimestampSanitizer, which nudges
+                                // just those packets forward by a tick. Guard: a
+                                // physically implausible overlap (> 0.5 s, e.g. a
+                                // malformed reset) re-anchors so we never compress
+                                // a long audio region into 1-tick spacing.
                                 let firstOutputDts = packet.pointee.dts - candidate
                                 let overlapTicks = lastOutputDts - firstOutputDts
                                 let maxOverlapTicks = audio.sourceTimeBase.num > 0
@@ -2014,7 +2025,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             // this measurement with the video-derived delta.
                             lastIndependentAudioRebase = (audioShiftPts, Date())
                         }
-                        pendingAudioInheritDelta = nil
+                        pendingAudioInheritShift = nil
                         EngineLog.emit(
                             "[HLSSegmentProducer] live audio timeline rebase: "
                             + "jumpTicks=\(jumpTicks) srcDts=\(packet.pointee.dts) "
@@ -2466,7 +2477,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             // still armed from before gate-open is thereby
                             // consumed and must not apply again at the next
                             // audio jump.
-                            pendingAudioInheritDelta = nil
+                            pendingAudioInheritShift = nil
                         } else {
                             // Restart session: keep the gate-on-video snap.
                             // The first audio packet is aligned to the video
