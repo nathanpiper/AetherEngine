@@ -1,4 +1,5 @@
 import Foundation
+import os
 import AetherEngine
 
 /// Bridges a `ByteRangeSource` into the engine's `IOReader`. `read`/`seek`
@@ -7,9 +8,13 @@ import AetherEngine
 public final class SMBIOReader: IOReader, @unchecked Sendable {
     private let source: ByteRangeSource
     private let ownsSource: Bool
+    // `position` and `didClose` are only accessed on the demux/teardown thread
+    // per the IOReader contract; no lock needed.
     private var position: Int64 = 0
-    private var inFlight: Task<Void, Never>?
     private var didClose = false
+    // `inFlight` is written on the demux thread (read()) and read on a
+    // different thread (cancel()), so it needs its own lock.
+    private let inFlightLock = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
 
     /// `AVSEEK_SIZE` from FFmpeg: return total size, do not move.
     private let avseekSize: Int32 = 65536
@@ -32,9 +37,9 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
             catch { outcome = .failure(error) }
             semaphore.signal()
         }
-        inFlight = task
+        inFlightLock.withLock { $0 = task }
         semaphore.wait()
-        inFlight = nil
+        inFlightLock.withLock { $0 = nil }
 
         switch outcome {
         case .failure:
@@ -49,19 +54,22 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
     }
 
     public func seek(offset: Int64, whence: Int32) -> Int64 {
+        let candidate: Int64
         switch whence {
-        case Int32(SEEK_SET): position = offset
-        case Int32(SEEK_CUR): position += offset
-        case Int32(SEEK_END): position = source.byteSize + offset
+        case Int32(SEEK_SET): candidate = offset
+        case Int32(SEEK_CUR): candidate = position + offset
+        case Int32(SEEK_END): candidate = source.byteSize + offset
         case avseekSize:      return source.byteSize
         default:              return -1
         }
-        if position < 0 { position = 0; return -1 }
+        guard candidate >= 0 else { return -1 }
+        position = candidate
         return position
     }
 
     public func cancel() {
-        inFlight?.cancel()
+        let task = inFlightLock.withLock { $0 }
+        task?.cancel()
     }
 
     public func makeIndependentReader() -> IOReader? {
