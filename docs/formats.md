@@ -109,6 +109,12 @@ Decrypted disc images play through the normal decode path via a synthetic seekab
 
 Both: no decryption (CSS / AACS retail discs must be ripped decrypted first), no GPL nav libraries, main title only (no menus, BD-J, or multi-angle).
 
+## Network sources (SMB)
+
+The optional `AetherEngineSMB` product plays media off an SMB2/3 share through the normal decode path, no server-side mount. `SMBConnection` (backed by [AMSMB2](https://github.com/amosavian/AMSMB2) / libsmb2, LGPL-2.1, same license tier as the bundled FFmpeg) is a `ByteRangeSource`; `SMBIOReader` adapts it to the engine's `IOReader`, bridging each synchronous demux-thread read to AMSMB2's async API. The reader is seekable, so audio-track switching, background reload, embedded subtitles, and scrub previews all work (`makeIndependentReader()` opens a second cursor on the same connection).
+
+Read-only. NTLMv2 and guest auth (no Kerberos, which tvOS lacks). No writing, locking, directory browsing, or SMB3 transit encryption. AMSMB2 exposes no persistent file handle, so each read is a fresh ranged fetch; this clears typical media bitrates comfortably. The dependency is linked only by consumers of the `AetherEngineSMB` product, so the core engine and its tvOS hosts never pull libsmb2. On tvOS the host supplies the local-network entitlement to reach a LAN share.
+
 ## Live ingest, AES-128, SSAI
 
 A live HLS upstream can be ingested directly via `HLSLiveIngestReader` (a public forward-only `IOReader`), no media server in the data path. Contract: MPEG-TS segments, including demuxed-audio variants (`EXT-X-MEDIA` audio groups, fetched by a companion reader and merged by DTS) and packed-audio renditions (raw ADTS framed by ID3 timestamps). AES-128 clear-key segments (`EXT-X-KEY:METHOD=AES-128`, the standard FAST-channel scheme) are decrypted in-line by `HLSSegmentDecryptor`: the key is fetched once per clip and memoised, each segment decrypted (AES-128-CBC / PKCS7) before demux. SAMPLE-AES / keyless AES-128 (no `URI`), fMP4 playlists (`EXT-X-MAP`), and a key-fetch / decrypt failure terminate with a typed `HLSIngestError` so the host can fall back to a server-mediated URL. This is standard HLS clear-key, not FairPlay / Widevine.

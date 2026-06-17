@@ -52,6 +52,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Streaming | One long-lived forward-streaming connection, reconnect-on-drop; CDN-stutter resilient |
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
 | Custom input | Play any byte source via the `IOReader` protocol (`load(source:)`) |
+| Network | SMB2/3 shares via the optional `AetherEngineSMB` product (NTLMv2 / guest, read-only) |
 
 ## Quick start
 
@@ -144,6 +145,22 @@ let probe = try await engine.load(source: .custom(MyArchiveReader(), formatHint:
 ```
 
 Seekable readers support audio-track switching and background reload; embedded subtitles and scrub-preview thumbnails additionally need `makeIndependentReader()` (a second cursor). Forward-only readers support plain playback + seeking (VOD on the software path; live sessions stay native). On the native path a custom reader's bytes are re-muxed to cleartext fMP4 on the loopback cache, fine for encrypted-at-rest archives, a cleartext exposure for content-protected sources. Full contract in [docs/formats.md](docs/formats.md).
+
+#### SMB shares (optional `AetherEngineSMB` product)
+
+Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([AMSMB2](https://github.com/amosavian/AMSMB2), LGPL-2.1) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core and never pull libsmb2.
+
+```swift
+import AetherEngineSMB
+
+let smb = try await SMBConnection.connect(
+    server: URL(string: "smb://nas.local")!, share: "media",
+    path: "Movies/film.mkv", user: "alice", password: "s3cret"
+)
+try await engine.load(source: .custom(SMBIOReader(source: smb), formatHint: "matroska"))
+```
+
+Read-only, NTLMv2 / guest auth (no Kerberos). On tvOS the host must declare `NSLocalNetworkUsageDescription` + the local-network entitlement to reach a LAN share. See [`aetherctl smbtest`](docs/cli.md#smbtest) to validate a share from macOS.
 
 ### Live TV / DVR
 

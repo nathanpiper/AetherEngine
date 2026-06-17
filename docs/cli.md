@@ -15,10 +15,11 @@ swift run aetherctl dvr                  # DVR rewind matrix across native + SW 
 swift run aetherctl hlsfixture <ts>      # local HLS live fixture with fault knobs + ingest self-test
 swift run aetherctl seektest <url>       # rapid-seek burst repro + clock-bounce / isSeeking probe
 swift run aetherctl hlslive              # SSAI live-direct-play repro against a synthetic ad-pod feed
+swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via the AetherEngineSMB reader
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Twelve subcommands plus the bare-URL `serve` alias.
+Thirteen subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -90,6 +91,16 @@ Drives a real AVPlayer (native loopback-HLS path) through a burst of rapid seeks
 ## hlslive
 
 Replays a synthetic SSAI ad-pod feed through the live-direct-play path to repro the FAST-channel ad-break handling (program-switch detection, muxer rotation with versioned `#EXT-X-MAP`, audio re-anchor, no-cut watchdog). `--segments N`, `--seconds N`, `--segment-seconds N` size the run; `--disc` injects discontinuities at the ad boundaries.
+
+## smbtest
+
+Connects to an SMB2/3 share with `SMBConnection` (AMSMB2 backend), wraps the file in `SMBIOReader`, and runs a sequential-throughput pass plus a random-seek consistency check. macOS-only; needs the optional `AetherEngineSMB` product (`swift build --product aetherctl` pulls it in). Validates the SMB byte source without a device:
+
+```bash
+swift run aetherctl smbtest "smb://user:pass@host/share/path/to/file.mkv" --reads 128
+```
+
+`--reads N` sets the random-seek count (default 64). Credentials default to guest when omitted from the URL; URL-encode special characters in the password.
 
 ## Fixtures
 
