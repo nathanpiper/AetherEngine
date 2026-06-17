@@ -2,6 +2,13 @@ import Foundation
 import os
 import AetherEngine
 
+/// Sendable one-shot holder for a blocking read's result. Written exactly once
+/// inside the bridging Task and read exactly once after the semaphore wait, so
+/// the `@unchecked Sendable` assertion holds.
+private final class ReadOutcome: @unchecked Sendable {
+    var result: Result<Data, Error> = .success(Data())
+}
+
 /// Bridges a `ByteRangeSource` into the engine's `IOReader`. `read`/`seek`
 /// are synchronous blocking calls on the engine's demux thread; the async
 /// source is driven through a `DispatchSemaphore`.
@@ -30,18 +37,21 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
         let want = Int(size)
 
         let semaphore = DispatchSemaphore(value: 0)
-        // `outcome` is written once on the Task, read once after wait(): no race.
-        nonisolated(unsafe) var outcome: Result<Data, Error> = .success(Data())
+        // `outcome` is written once inside the Task and read once after wait().
+        // It lives in a Sendable box (not a captured local var) so the Task's
+        // closure stays Sendable under strict concurrency; the semaphore
+        // provides the happens-before edge that makes the single write/read safe.
+        let outcome = ReadOutcome()
         let task = Task { [source] in
-            do { outcome = .success(try await source.read(at: offset, length: want)) }
-            catch { outcome = .failure(error) }
+            do { outcome.result = .success(try await source.read(at: offset, length: want)) }
+            catch { outcome.result = .failure(error) }
             semaphore.signal()
         }
         inFlightLock.withLock { $0 = task }
         semaphore.wait()
         inFlightLock.withLock { $0 = nil }
 
-        switch outcome {
+        switch outcome.result {
         case .failure:
             return -1
         case .success(let data):
