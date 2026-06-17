@@ -3,6 +3,14 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
+/// Which subtitle output path a reader / apply / cancel call targets.
+/// `.primary` maps to the original single-track storage and behavior;
+/// `.secondary` maps to the independent companion track (issue #47).
+public enum SubtitleChannel: Sendable {
+    case primary
+    case secondary
+}
+
 extension AetherEngine {
 
     /// Activate an embedded subtitle stream from the source. A side
@@ -496,5 +504,22 @@ extension AetherEngine {
     func cancelSidecarTask() {
         sidecarTask?.cancel()
         sidecarTask = nil
+    }
+
+    /// Turn the secondary subtitle off and clear its cues. Tears down
+    /// the secondary sidecar decode task and the secondary side reader.
+    // TODO(Task 2): replace inline teardown with cancelSidecarTask(channel:.secondary) + cancelEmbeddedSubtitleReader(channel:.secondary)
+    public func clearSecondarySubtitle() {
+        secondarySidecarTask?.cancel()
+        secondarySidecarTask = nil
+        secondaryEmbeddedSubtitleTask?.cancel()
+        secondaryEmbeddedSubtitleTask = nil
+        secondarySubtitleSideDemuxer?.markClosed()
+        secondarySubtitleSideDemuxer = nil
+        activeSecondaryEmbeddedSubtitleStreamIndex = -1
+        loadedSecondarySidecarURL = nil
+        isSecondarySubtitleActive = false
+        secondarySubtitleCues = []
+        isLoadingSecondarySubtitles = false
     }
 }

@@ -247,6 +247,17 @@ public final class AetherEngine: ObservableObject {
     /// True when sidecar subtitles are the active subtitle source.
     @Published public internal(set) var isSubtitleActive: Bool = false
 
+    /// Decoded cues for the independent SECONDARY subtitle track
+    /// (issue #47). Text-only: bitmap codecs are rejected at selection.
+    /// Populated by `selectSecondarySubtitleTrack(index:)` (embedded)
+    /// or `selectSecondarySidecarSubtitle(url:)` (sidecar), independent
+    /// of the primary track.
+    @Published public internal(set) var secondarySubtitleCues: [SubtitleCue] = []
+    /// True while a secondary sidecar file is being downloaded + decoded.
+    @Published public internal(set) var isLoadingSecondarySubtitles: Bool = false
+    /// True when a secondary subtitle source is active.
+    @Published public internal(set) var isSecondarySubtitleActive: Bool = false
+
     /// True while the active session is a live stream (the host set
     /// `LoadOptions.isLive = true` at load time). Hosts use this to
     /// hide duration / scrubber UI, skip seek affordances, and switch
@@ -632,6 +643,14 @@ public final class AetherEngine: ObservableObject {
     /// `seek` to know whether to re-arm the side demuxer at the new
     /// playback position.
     var activeEmbeddedSubtitleStreamIndex: Int32 = -1
+
+    /// Secondary-channel mirrors of the subtitle reader state (issue #47).
+    /// Each is the exact analogue of the primary field above and is
+    /// driven only through `SubtitleChannel.secondary`.
+    var secondarySidecarTask: Task<Void, Never>?
+    var secondaryEmbeddedSubtitleTask: Task<Void, Never>?
+    var activeSecondaryEmbeddedSubtitleStreamIndex: Int32 = -1
+    var secondarySubtitleSideDemuxer: Demuxer?
 
     /// Source video dimensions captured at `load()` probe time. The
     /// embedded subtitle decoder uses these as a canvas-size fallback
@@ -1897,6 +1916,8 @@ public final class AetherEngine: ObservableObject {
     /// so `selectAudioTrack` can rehydrate the same selection after the
     /// pipeline reload. Cleared by `clearSubtitle` and `stopInternal`.
     var loadedSidecarURL: URL?
+    /// Active secondary sidecar URL, or nil. Mirror of `loadedSidecarURL`.
+    var loadedSecondarySidecarURL: URL?
 
     // MARK: - Internal teardown
 
