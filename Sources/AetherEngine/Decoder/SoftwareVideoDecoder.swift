@@ -37,6 +37,15 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// True when the source stream is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false
 
+    /// Source pixel aspect ratio (SAR), captured from the stream at
+    /// open() as a fallback for any frame that doesn't carry its own.
+    /// Anamorphic DVD / SD content (NTSC 720x480 stored at 4:3, PAL
+    /// 720x576, widescreen DVDs) encodes non-square pixels; without
+    /// applying the SAR the picture renders horizontally squished
+    /// ("flattened"). The native VideoToolbox path gets this from the
+    /// container automatically; the software path has to attach it.
+    private var streamSAR = AVRational(num: 1, den: 1)
+
     /// Pixel buffer pool, reuses allocations instead of creating per frame.
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth = 0
@@ -85,6 +94,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
 
         timeBase = stream.pointee.time_base
+
+        // Capture the container-declared SAR up front. Frames usually
+        // carry their own sample_aspect_ratio (MPEG-2 seq header, set
+        // from frame 1), but this is the fallback when a frame reports
+        // an unset 0:0 / 1:1 ratio. See `streamSAR`.
+        streamSAR = codecpar.pointee.sample_aspect_ratio
 
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
@@ -374,6 +389,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // renders with correct primaries/transfer/matrix (critical for HDR).
         attachColorSpace(from: frame, to: pb)
 
+        // Attach the pixel aspect ratio so anamorphic SD content (DVD
+        // rips: NTSC 720x480 at 4:3, PAL 720x576, widescreen DVDs) is
+        // un-squished. CMVideoFormatDescriptionCreateForImageBuffer in
+        // the renderer folds this into the format description's
+        // PixelAspectRatio extension, which AVSampleBufferDisplayLayer
+        // honors when sizing the picture.
+        attachPixelAspectRatio(from: frame, to: pb)
+
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
 
@@ -441,5 +464,27 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if let matrix {
             CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
         }
+    }
+
+    // MARK: - Pixel Aspect Ratio (anamorphic SD)
+
+    /// Attach the source SAR as `kCVImageBufferPixelAspectRatioKey` so
+    /// anamorphic content displays at its intended aspect. Prefers the
+    /// frame's own `sample_aspect_ratio`, falling back to the stream's
+    /// `streamSAR`. A 0:0 or 1:1 ratio means square pixels (no
+    /// correction needed), so we skip the attachment in that case and
+    /// let the buffer render at its native dimensions.
+    private func attachPixelAspectRatio(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
+        var sar = frame.pointee.sample_aspect_ratio
+        if sar.num <= 0 || sar.den <= 0 {
+            sar = streamSAR
+        }
+        guard sar.num > 0, sar.den > 0, sar.num != sar.den else { return }
+
+        let aspect: NSDictionary = [
+            kCVImageBufferPixelAspectRatioHorizontalSpacingKey: Int(sar.num),
+            kCVImageBufferPixelAspectRatioVerticalSpacingKey: Int(sar.den),
+        ]
+        CVBufferSetAttachment(pb, kCVImageBufferPixelAspectRatioKey, aspect, .shouldPropagate)
     }
 }
