@@ -220,10 +220,28 @@ extension AetherEngine {
             demuxer.seek(to: duration * 0.5)
         }
 
+        // Re-sample the live playhead after the (potentially slow) open +
+        // prewarm. `startAt` was captured before `demuxer.open` and the
+        // `duration*0.5` prewarm seek; on a large/remote/high-latency source
+        // those steps cost several seconds of wall-clock during which unpaused
+        // playback advances. Seeking to the pre-open `startAt` would land
+        // behind the live playhead and page forward over already-played
+        // content, so the first cues arrive behind the playhead and are
+        // dropped by the current-cue lookup until the read catches up, which
+        // is the tens-of-seconds activation delay in #52. Re-targeting the
+        // single existing seek to the fresh playhead costs no extra network
+        // seek and is a no-op when paused, on a fast/local open, and on the
+        // seek re-arm path (sourceTime is already the seek target there).
+        // `max` guards the wrong direction: we never seek behind the requested
+        // anchor, only forward to catch up to live.
+        let freshPlayhead = await MainActor.run { [weak self] in self?.sourceTime }
+        let effectiveStart = max(startAt, freshPlayhead ?? startAt)
+
         // Now the real seek. Slightly before the playhead so bitmap
         // subtitle codecs (PGS / DVB / HDMV) catch their state-machine
-        // SETUP segments before the first END / EVENT segment.
-        let seekTo = max(0, startAt - 2.0)
+        // SETUP segments before the first END / EVENT segment. Keep the
+        // -2.0 lead-in on the re-sampled target (#52).
+        let seekTo = max(0, effectiveStart - 2.0)
         demuxer.seek(to: seekTo)
 
         guard let stream = demuxer.stream(at: streamIndex),
@@ -272,7 +290,9 @@ extension AetherEngine {
         let videoTb = videoStream?.pointee.time_base ?? AVRational(num: 1, den: 1)
         EngineLog.emit(
             "[AetherEngine] embedded subtitle reader started: stream=\(streamIndex) " +
-            "startAt=\(String(format: "%.2f", startAt))s seekTo=\(String(format: "%.2f", seekTo))s " +
+            "startAt=\(String(format: "%.2f", startAt))s " +
+            "effectiveStart=\(String(format: "%.2f", effectiveStart))s " +
+            "seekTo=\(String(format: "%.2f", seekTo))s " +
             "codec=\(decoder.codecID.rawValue) " +
             "subTb=\(tb.num)/\(tb.den) subStart=\(streamStartTime) " +
             "videoTb=\(videoTb.num)/\(videoTb.den) videoStart=\(videoStreamStart) " +
@@ -297,7 +317,11 @@ extension AetherEngine {
         // the playhead. `playheadSnapshot` is refreshed lazily from
         // the MainActor only when the threshold trips, which in steady
         // state is a couple of hops per second at the lead boundary.
-        var playheadSnapshot = startAt
+        // Seed from the re-sampled playhead (not the stale pre-open
+        // `startAt`), or the first packet after the new seek trips the park
+        // gate immediately and logs a spurious park before self-correcting
+        // off the next sourceTime refresh (#52).
+        var playheadSnapshot = effectiveStart
         var parkLogged = false
         var timeBaseCache: [Int32: AVRational] = [:]
 
