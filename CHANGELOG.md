@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.11.6] — 2026-06-20
+
+### Fixed
+
+- **Still-image / scrub-preview thumbnails of anamorphic SD content rendered horizontally stretched (#23).** `FrameExtractor` (the on-device frame source for scrub previews and chapter thumbnails) scaled each decoded frame using its coded width and height only, ignoring the sample aspect ratio, so an NTSC DVD (720x480 stored, displayed at 4:3) produced a 3:2 thumbnail. `FrameDecodeContext` now reads the stream SAR at open (per-frame SAR as a fallback, since the software decoder does not reliably attach it) and folds it into the output height via `displayDimensions(...)`, so thumbnails keep the source display aspect (4:3 here, 16:9 for anamorphic widescreen DVDs). Mirrors the main decode-path SAR fix (3.11.3). The HDR tone-map thumbnail path is unchanged (anamorphic content is effectively always SDR). Regression test covers NTSC, PAL, and anamorphic ratios.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.11.6))
+
 ## [3.11.5] — 2026-06-20
 
 ### Fixed
