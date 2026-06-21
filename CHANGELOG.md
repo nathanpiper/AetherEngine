@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-06-21
+
+### Added
+
+- **`clock.bufferedPosition` for buffer-bar indicators (#54).** A new published value on `engine.clock` reports how far ahead the engine has buffered, on the same source axis as `sourceTime`, so a host can draw a YouTube-style buffer bar as `bufferedPosition / duration`. On the native AVPlayer path it is the end of the contiguous `loadedTimeRanges` span covering the playhead, folded with the same seam shift as `sourceTime`; on the software (dav1d / libavcodec) path it is the newest demuxed source PTS, i.e. how far ahead bytes have been fetched and demuxed from the (possibly remote) source; the audio path mirrors `currentTime`. Clamped to never trail the rendered frame, reset on load / stop. Additive, no behavior change to existing surfaces.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.12.0))
+
 ## [3.11.7] — 2026-06-20
 
 ### Fixed
