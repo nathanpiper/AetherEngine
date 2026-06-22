@@ -651,7 +651,6 @@ extension AetherEngine {
         subtitleCues = []
         sidecarASSHeader = nil
         isLoadingSubtitles = false
-        nativeSubtitleCueStore = nil
         cancelNativeSubtitleReaders()
         nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
         nativeVideoSession?.nativeSubtitleCueStoresForSession = []
@@ -730,8 +729,6 @@ extension AetherEngine {
         nativeSubtitleReadersTask = nil
         nativeSubtitleReadersDemuxer?.markClosed()
         nativeSubtitleReadersDemuxer = nil
-        for (_, task) in nativeSidecarTasks { task.cancel() }
-        nativeSidecarTasks.removeAll()
     }
 
     /// One side-demuxer pass that opens an `EmbeddedSubtitleDecoder` for

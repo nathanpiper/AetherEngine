@@ -370,9 +370,22 @@ final class MP4SegmentMuxer {
         counter.fd = firstFd
         self.byteCounter = counter
 
+        // When subtitle streams are declared, movenc 62.x forces the first
+        // subtitle tkhd to enabled=1 in the moov payload regardless of
+        // disposition=0 or default_mode settings. Post-process the captured
+        // init segment to clear the enabled bit on every subtitle tkhd before
+        // the bytes reach the HLS init.mp4 handler. The patched bytes are
+        // otherwise byte-for-byte identical to what movenc emits, and the
+        // post-process is a no-op when no subtitle streams are declared.
+        let subtitleCount = subtitles.count
         self.splitter = FragmentSplitter(
             onHeaderComplete: { initBytes in
-                onInitCaptured(initBytes)
+                if subtitleCount > 0 {
+                    let patched = Self.clearSubtitleTkhdEnabled(initBytes)
+                    onInitCaptured(patched)
+                } else {
+                    onInitCaptured(initBytes)
+                }
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
@@ -603,7 +616,6 @@ final class MP4SegmentMuxer {
         if let extradata = video.extradataOverride {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
         }
-
         // Audio stream (optional).
         if let audio = audio {
             guard let audioStream = avformat_new_stream(ctx, nil) else {
@@ -630,6 +642,15 @@ final class MP4SegmentMuxer {
         // (When disposition includes AV_DISPOSITION_DEFAULT the sole subtitle
         // track becomes the defaultOption and auto-displays, causing double
         // subtitles with the host-rendered inline track.)
+        //
+        // NOTE: movenc in libavformat 62.x still forces `enabled=1` on the
+        // first subtitle tkhd regardless of disposition=0 and even when
+        // default_mode=infer_no_subs or passthrough is set. The muxer-level
+        // knob is therefore NOT sufficient. The init-segment bytes are
+        // post-processed in `clearSubtitleTkhdEnabled(_:)` to clear the
+        // enabled bit directly in the moov payload before the bytes are
+        // handed to the caller. That post-process is applied inside the
+        // `onHeaderComplete` closure below when subtitle streams are present.
         for cfg in subtitles {
             guard let subStream = avformat_new_stream(ctx, nil) else {
                 throw MuxerError.streamCreationFailed
@@ -684,6 +705,10 @@ final class MP4SegmentMuxer {
         // for subtitle tracks while still marking audio/video defaults
         // normally. Guarded to only apply when subtitle streams are
         // present to avoid touching video/audio-only session behaviour.
+        // Note: as of libavformat 62.x infer_no_subs is insufficient
+        // empirically (first subtitle still gets enabled=1 in tkhd).
+        // The byte-level post-process in clearSubtitleTkhdEnabled handles
+        // the remaining cases that the movenc option leaves uncorrected.
         if !subtitles.isEmpty {
             av_dict_set(&opts, "default_mode", "infer_no_subs", 0)
         }
@@ -1094,6 +1119,143 @@ final class MP4SegmentMuxer {
     }
 
     // MARK: - Helpers
+
+    /// Walk the moov box in `initData` and clear the `enabled` flag (bit 0
+    /// of the 24-bit tkhd flags field) on every subtitle trak.
+    ///
+    /// Background: libavformat's movenc forces `enabled=1` on the first
+    /// subtitle tkhd in libavformat 62.x regardless of the stream's
+    /// `disposition` field or the `default_mode` option. AVFoundation
+    /// treats a `tkhd` with `enabled=1` as `defaultOption` on the legible
+    /// `AVMediaSelectionGroup`, which auto-displays the track without the
+    /// host selecting it. Clearing the bit here (after write_header but
+    /// before the bytes leave the muxer) is the only reliable fix.
+    ///
+    /// Algorithm:
+    ///   1. Walk top-level boxes to find `moov`.
+    ///   2. Inside `moov`, enumerate `trak` children.
+    ///   3. For each `trak`, scan its children for `tkhd` and for
+    ///      `mdia > hdlr` to read the handler type.
+    ///   4. If the handler type is `sbtl` or `text` (subtitle), clear
+    ///      bit 0 of the tkhd flags field (bytes [9..11] of the tkhd body).
+    ///
+    /// The patched bytes are otherwise byte-identical to the original.
+    /// No-op when the moov cannot be located (malformed init segment).
+    static func clearSubtitleTkhdEnabled(_ initData: Data) -> Data {
+        var bytes = initData
+        let count = bytes.count
+
+        // Inline big-endian UInt32 reader. Uses byte-by-byte assembly to
+        // avoid alignment faults on Data buffers that are not 4-byte aligned.
+        func readU32(_ offset: Int) -> UInt32? {
+            guard offset + 4 <= count else { return nil }
+            return bytes.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> UInt32 in
+                let b0 = UInt32(ptr[offset])
+                let b1 = UInt32(ptr[offset + 1])
+                let b2 = UInt32(ptr[offset + 2])
+                let b3 = UInt32(ptr[offset + 3])
+                return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+        }
+
+        // Walk top-level boxes to find moov.
+        var pos = 0
+        var moovStart = -1
+        var moovEnd = -1
+        while pos + 8 <= count {
+            guard let size32 = readU32(pos) else { break }
+            let boxSize: Int
+            if size32 == 1 {
+                // Extended 64-bit size. Read 8 more bytes.
+                guard pos + 16 <= count,
+                      let hi = readU32(pos + 8), let lo = readU32(pos + 12)
+                else { break }
+                boxSize = Int((UInt64(hi) << 32) | UInt64(lo))
+            } else if size32 == 0 {
+                boxSize = count - pos  // box extends to EOF
+            } else {
+                boxSize = Int(size32)
+            }
+            guard boxSize >= 8, pos + boxSize <= count else { break }
+            let name = bytes[pos + 4 ..< pos + 8]
+            if name == Data([0x6d, 0x6f, 0x6f, 0x76]) { // "moov"
+                moovStart = pos + 8  // skip size+name
+                moovEnd   = pos + boxSize
+                break
+            }
+            pos += boxSize
+        }
+        guard moovStart >= 0 else { return bytes }  // no moov found
+
+        // Walk trak children of moov.
+        pos = moovStart
+        while pos + 8 <= moovEnd {
+            guard let size32 = readU32(pos) else { break }
+            let boxSize = size32 == 0 ? (moovEnd - pos) : Int(size32)
+            guard boxSize >= 8, pos + boxSize <= moovEnd else { break }
+            let name = bytes[pos + 4 ..< pos + 8]
+            if name == Data([0x74, 0x72, 0x61, 0x6b]) { // "trak"
+                let trakStart = pos + 8
+                let trakEnd   = pos + boxSize
+
+                // Collect tkhd offset and hdlr handler type from this trak.
+                var tkhdFlagsOffset = -1   // byte offset of the 3-byte flags inside tkhd
+                var handlerType: Data? = nil
+
+                var trakPos = trakStart
+                while trakPos + 8 <= trakEnd {
+                    guard let sz32 = readU32(trakPos) else { break }
+                    let sz = sz32 == 0 ? (trakEnd - trakPos) : Int(sz32)
+                    guard sz >= 8, trakPos + sz <= trakEnd else { break }
+                    let boxName = bytes[trakPos + 4 ..< trakPos + 8]
+
+                    if boxName == Data([0x74, 0x6b, 0x68, 0x64]) { // "tkhd"
+                        // tkhd layout: [size 4B][name 4B][version 1B][flags 3B][...]
+                        // flags offset = trakPos + 8 (skip size+name) + 1 (version) = trakPos + 9
+                        let fOffset = trakPos + 9
+                        if fOffset + 3 <= trakEnd {
+                            tkhdFlagsOffset = fOffset
+                        }
+                    } else if boxName == Data([0x6d, 0x64, 0x69, 0x61]) { // "mdia"
+                        // Walk mdia to find hdlr.
+                        let mdiaStart = trakPos + 8
+                        let mdiaEnd   = trakPos + sz
+                        var mPos = mdiaStart
+                        while mPos + 8 <= mdiaEnd {
+                            guard let msz32 = readU32(mPos) else { break }
+                            let msz = msz32 == 0 ? (mdiaEnd - mPos) : Int(msz32)
+                            guard msz >= 8, mPos + msz <= mdiaEnd else { break }
+                            let mn = bytes[mPos + 4 ..< mPos + 8]
+                            if mn == Data([0x68, 0x64, 0x6c, 0x72]) { // "hdlr"
+                                // hdlr: [size][name][version 1B][flags 3B]
+                                //       [pre_defined 4B][handler_type 4B][...]
+                                let htOffset = mPos + 8 + 1 + 3 + 4  // skip sz+name+ver+flags+predefined
+                                if htOffset + 4 <= mdiaEnd {
+                                    handlerType = bytes[htOffset ..< htOffset + 4]
+                                }
+                                break
+                            }
+                            mPos += msz
+                        }
+                    }
+                    trakPos += sz
+                }
+
+                // Subtitle handler types: 'sbtl' (tx3g/mov_text) or 'text'.
+                let isSbtl = handlerType == Data([0x73, 0x62, 0x74, 0x6c]) // "sbtl"
+                let isText = handlerType == Data([0x74, 0x65, 0x78, 0x74]) // "text"
+                if (isSbtl || isText), tkhdFlagsOffset >= 0 {
+                    // Clear bit 0 (enabled) of the most-significant byte of the
+                    // 3-byte big-endian flags field. The three bytes are at
+                    // [tkhdFlagsOffset], [+1], [+2]; the enabled flag is bit 0
+                    // of the 24-bit big-endian value, which is bit 0 of byte [+2].
+                    bytes[tkhdFlagsOffset + 2] &= 0xFE
+                }
+            }
+            pos += boxSize
+        }
+        return bytes
+    }
 
     /// Encode a four-character code as a little-endian UInt32.
     private static func mkTag(fromFourCC fourCC: String) -> UInt32? {

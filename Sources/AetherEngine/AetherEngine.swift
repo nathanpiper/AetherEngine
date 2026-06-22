@@ -761,14 +761,6 @@ public final class AetherEngine: ObservableObject {
     /// reconnect loop otherwise survives stop()/track switches.
     var activeSubtitleSideDemuxer: Demuxer?
 
-    /// Cue store backing the native mov_text track (#55). Non-nil only
-    /// when `LoadOptions.prepareNativeSubtitles` is set and a text
-    /// subtitle track has been selected. The side-demuxer reader
-    /// appends decoded cues here concurrently with `subtitleCues`;
-    /// the segment producer drains it per cut via `cuesInWindow`.
-    /// Cleared by `clearSubtitle` and `stopInternal`.
-    var nativeSubtitleCueStore: NativeSubtitleCueStore?
-
     /// One entry per native text subtitle track, in the order the muxer
     /// declares its mov_text streams (#55, all-tracks). Built at load time
     /// from the probed `subtitleTracks` (non-bitmap codecs, source order),
@@ -796,11 +788,6 @@ public final class AetherEngine: ObservableObject {
     /// unblocks a read parked in the AVIO reconnect loop so the reader exits
     /// promptly on stop / clear (mirrors `activeSubtitleSideDemuxer`).
     var nativeSubtitleReadersDemuxer: Demuxer?
-
-    /// Per-sidecar decode tasks for sidecars in the native track table
-    /// (#55, all-tracks). One end-to-end decode per sidecar into its store;
-    /// keyed by the table ordinal so a re-select replaces the prior task.
-    var nativeSidecarTasks: [Int: Task<Void, Never>] = [:]
 
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
@@ -2196,7 +2183,6 @@ public final class AetherEngine: ObservableObject {
         subtitleCues = []
         sidecarASSHeader = nil
         isLoadingSubtitles = false
-        nativeSubtitleCueStore = nil
         nativeSubtitleTrackTable = []
         cancelNativeSubtitleReaders()
         nativeSubtitleRenditionAvailable = false
