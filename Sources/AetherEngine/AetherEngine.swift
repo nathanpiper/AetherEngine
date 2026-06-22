@@ -769,6 +769,39 @@ public final class AetherEngine: ObservableObject {
     /// Cleared by `clearSubtitle` and `stopInternal`.
     var nativeSubtitleCueStore: NativeSubtitleCueStore?
 
+    /// One entry per native text subtitle track, in the order the muxer
+    /// declares its mov_text streams (#55, all-tracks). Built at load time
+    /// from the probed `subtitleTracks` (non-bitmap codecs, source order),
+    /// then sidecar entries appended as they are selected at runtime.
+    /// `sourceStreamIndex` is the source AVStream index for embedded tracks
+    /// (nil for sidecars); `language` is the track's metadata language tag
+    /// (ISO 639-2, e.g. "eng"). The ordinal is the entry's position in the
+    /// array. Empty => native subtitles stay disabled (the existing gating
+    /// in `enableNativeSubtitleTrackForSession`). Cleared on stop/load.
+    struct NativeSubtitleTrackEntry: Sendable {
+        let sourceStreamIndex: Int?
+        let language: String?
+    }
+    var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
+
+    /// Detached reader that decodes EVERY embedded text subtitle stream in
+    /// ONE side-demuxer pass into its ordinal's `NativeSubtitleCueStore`
+    /// (#55, all-tracks). Separate from and parallel to the inline single-
+    /// track reader (`embeddedSubtitleTask`), which still drives
+    /// `subtitleCues` for the active track with full styling. Cancelled on
+    /// stop / clear / load.
+    var nativeSubtitleReadersTask: Task<Void, Never>?
+
+    /// Abort handle for the native multi-decode side demuxer. `markClosed`
+    /// unblocks a read parked in the AVIO reconnect loop so the reader exits
+    /// promptly on stop / clear (mirrors `activeSubtitleSideDemuxer`).
+    var nativeSubtitleReadersDemuxer: Demuxer?
+
+    /// Per-sidecar decode tasks for sidecars in the native track table
+    /// (#55, all-tracks). One end-to-end decode per sidecar into its store;
+    /// keyed by the table ordinal so a re-select replaces the prior task.
+    var nativeSidecarTasks: [Int: Task<Void, Never>] = [:]
+
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
     /// session gets a fresh budget.
@@ -1007,6 +1040,7 @@ public final class AetherEngine: ObservableObject {
         clock.progress = 0
         audioTracks = []
         subtitleTracks = []
+        nativeSubtitleTrackTable = []
         metadata = nil
         fontAttachments = []
         subtitleCueDiagnosticCount = 0
@@ -2163,6 +2197,8 @@ public final class AetherEngine: ObservableObject {
         sidecarASSHeader = nil
         isLoadingSubtitles = false
         nativeSubtitleCueStore = nil
+        nativeSubtitleTrackTable = []
+        cancelNativeSubtitleReaders()
         nativeSubtitleRenditionAvailable = false
         cancelSidecarTask(channel: .secondary)
         cancelEmbeddedSubtitleReader(channel: .secondary)

@@ -335,7 +335,17 @@ extension AetherEngine {
         let bitmapCodecNames: Set<String> = [
             "hdmv_pgs_subtitle", "dvb_subtitle", "dvd_subtitle", "xsub"
         ]
-        let hasTextSubtitleTrack = subtitleTracks.contains { !bitmapCodecNames.contains($0.codec) }
+        // Build the ordered native-track table: every non-bitmap subtitle
+        // stream, in source order. Each becomes one mov_text track in the
+        // muxer init moov (#55, all-tracks). Sidecar entries are appended
+        // at runtime when a sidecar is selected, so the load-time table is
+        // embedded-only here. `track.id` is the source AVStream index;
+        // `track.language` is the stream's metadata language tag (ISO 639-2).
+        let textTracks = subtitleTracks.filter { !bitmapCodecNames.contains($0.codec) }
+        nativeSubtitleTrackTable = textTracks.map { track in
+            NativeSubtitleTrackEntry(sourceStreamIndex: track.id, language: track.language)
+        }
+        let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
         session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
 
         // AVPlayer HLS playback over the loopback HTTP server. Detach
@@ -354,6 +364,26 @@ extension AetherEngine {
             try checkLoadCurrent(generation)
         }
         self.nativeVideoSession = session
+
+        // Native mov_text rendition, all tracks (#55). When the session is
+        // enabled, allocate one cue store per declared text track, wire the
+        // set onto the session (so makeProducer re-threads it across
+        // restarts) and the running producer, then launch the dedicated
+        // multi-decode reader that fills every store in one side-demuxer
+        // pass. This is SEPARATE from the inline single-track decode the
+        // host drives via selectSubtitleTrack; the inline path keeps owning
+        // `subtitleCues` (host overlay) and is untouched here.
+        if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
+            let stores = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
+            let shift = session.playlistShiftSeconds
+            stores.forEach { $0.setShiftSeconds(shift) }
+            let languages = nativeSubtitleTrackTable.map { $0.language }
+            session.nativeSubtitleCueStoresForSession = stores
+            session.nativeSubtitleLanguagesForSession = languages
+            session.producer?.subtitleCueStores = stores
+            session.producer?.nativeSubtitleLanguages = languages
+            startNativeSubtitleReaders(url: url, stores: stores)
+        }
 
         // Reuse the existing native host across a native->native reload
         // (episode change, audio-track switch) so the AVPlayer instance,
