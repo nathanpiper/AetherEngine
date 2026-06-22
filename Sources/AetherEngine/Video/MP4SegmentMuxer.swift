@@ -704,6 +704,18 @@ final class MP4SegmentMuxer {
         Int64((s * Double(timescale)).rounded())
     }
 
+    /// BCP-47 two-letter to ISO 639-2/T three-letter language code mapping
+    /// for common languages. Reused by `iso639_2(fromBCP47:)` without
+    /// re-allocation on every call.
+    private static let bcp47ToISO639_2: [String: String] = [
+        "en": "eng", "de": "deu", "ja": "jpn", "fr": "fra",
+        "es": "spa", "it": "ita", "pt": "por", "ru": "rus",
+        "zh": "zho", "ko": "kor", "nl": "nld", "pl": "pol",
+        "sv": "swe", "da": "dan", "no": "nor", "fi": "fin",
+        "tr": "tur", "ar": "ara", "cs": "ces", "el": "ell",
+        "he": "heb", "hi": "hin", "th": "tha", "uk": "ukr",
+    ]
+
     /// Map a BCP-47 language tag to an ISO 639-2/T three-letter code
     /// suitable for the QuickTime `language` metadata key (e.g. "eng",
     /// "deu"). Returns nil when `tag` is nil or not in the known table,
@@ -711,7 +723,7 @@ final class MP4SegmentMuxer {
     ///
     /// Mapping rules:
     /// - Strip any region subtag after the first "-" (en-US -> "en").
-    /// - Look up the base tag in a static two-letter -> three-letter table.
+    /// - Look up the base tag in the static two-letter -> three-letter table.
     /// - A tag that is already three lowercase letters is passed through
     ///   as-is (caller already has an ISO 639-2 code).
     /// - Unknown tags return nil.
@@ -724,16 +736,7 @@ final class MP4SegmentMuxer {
         if lower.count == 3 && lower.allSatisfy(\.isLetter) {
             return lower
         }
-        // BCP-47 two-letter -> ISO 639-2/T table (common languages).
-        let table: [String: String] = [
-            "en": "eng", "de": "deu", "ja": "jpn", "fr": "fra",
-            "es": "spa", "it": "ita", "pt": "por", "ru": "rus",
-            "zh": "zho", "ko": "kor", "nl": "nld", "pl": "pol",
-            "sv": "swe", "da": "dan", "no": "nor", "fi": "fin",
-            "tr": "tur", "ar": "ara", "cs": "ces", "el": "ell",
-            "he": "heb", "hi": "hin", "th": "tha", "uk": "ukr",
-        ]
-        return table[lower]
+        return bcp47ToISO639_2[lower]
     }
 
     /// Write one mov_text sample into the muxer's subtitle stream.

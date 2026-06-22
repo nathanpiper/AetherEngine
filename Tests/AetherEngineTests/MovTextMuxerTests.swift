@@ -18,5 +18,7 @@ final class MovTextMuxerTests: XCTestCase {
         XCTAssertEqual(MP4SegmentMuxer.iso639_2(fromBCP47: "ja"), "jpn")
         XCTAssertEqual(MP4SegmentMuxer.iso639_2(fromBCP47: "en-US"), "eng") // region stripped
         XCTAssertNil(MP4SegmentMuxer.iso639_2(fromBCP47: nil))
+        XCTAssertEqual(MP4SegmentMuxer.iso639_2(fromBCP47: "eng"), "eng") // 3-letter passthrough
+        XCTAssertNil(MP4SegmentMuxer.iso639_2(fromBCP47: "xx")) // unknown tag
     }
 }
