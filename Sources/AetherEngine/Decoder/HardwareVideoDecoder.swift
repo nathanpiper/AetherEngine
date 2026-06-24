@@ -23,7 +23,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var _onFrame: DecodedFrameHandler?
     /// Not yet wired on the VT side (follow-up: read AV_PKT_DATA_DYNAMIC_HDR10_PLUS before decode,
     /// mirror SoftwareVideoDecoder.extractHDR10PlusBytes). Flag kept so host wiring stays identical to SW path.
-    var onFirstHDR10PlusDetected: (() -> Void)?
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
 
     /// Skip pre-seek RASL frames to avoid the "fast forward" effect; decoded for reference but not delivered.
     /// Guarded by `skipLock` not `lock`: close() holds `lock` across VTDecompressionSessionWaitForAsynchronousFrames,

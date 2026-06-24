@@ -18,7 +18,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     /// Fires once (demux thread) on first HDR10+ side data; engine flips videoFormat to .hdr10Plus.
     private var seenHDR10Plus = false
-    var onFirstHDR10PlusDetected: (() -> Void)?
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
 
     /// True when the source is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false

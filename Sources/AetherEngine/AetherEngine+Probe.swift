@@ -114,8 +114,11 @@ extension AetherEngine {
         let height = stream.pointee.codecpar.pointee.height
 
         let decoder = SoftwareVideoDecoder()
-        // Class for captured-by-reference mutable accumulators; closure fires synchronously inside avcodec_send_packet / receive_frame.
-        final class Accum {
+        // Class for captured-by-reference mutable accumulators; the onFrame closure fires SYNCHRONOUSLY on this same
+        // thread inside avcodec_send_packet / receive_frame (the probe drives decode inline, no demux thread). The
+        // DecodedFrameHandler is @Sendable for the off-actor playback path, so this single-threaded capture is an
+        // honest @unchecked Sendable exception.
+        final class Accum: @unchecked Sendable {
             var framesDecoded = 0
             var firstFramePixelFormat: String?
             var firstFrameWidth: Int = 0

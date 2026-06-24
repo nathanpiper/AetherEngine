@@ -6,7 +6,7 @@ import Libavcodec
 
 /// Decoded frame callback. `hdr10PlusT35` carries HDR10+ dynamic metadata serialised to ITU-T T.35 bytes
 /// (kCMSampleAttachmentKey_HDR10PlusPerFrameData format); nil for non-HDR10+ streams.
-typealias DecodedFrameHandler = (CVPixelBuffer, CMTime, Data?) -> Void
+typealias DecodedFrameHandler = @Sendable (CVPixelBuffer, CMTime, Data?) -> Void
 
 /// Common video decoder protocol. SoftwareVideoDecoder (libavcodec, AV1/VP9) and
 /// HardwareVideoDecoder (VTDecompressionSession, HEVC) both conform; the host swaps per codec without rewiring the demux loop.
@@ -14,7 +14,7 @@ typealias DecodedFrameHandler = (CVPixelBuffer, CMTime, Data?) -> Void
 // (internally lock-guarded), so `any VideoDecodingPipeline` is safe to capture in @Sendable closures.
 protocol VideoDecodingPipeline: AnyObject, Sendable {
     var onFrame: DecodedFrameHandler? { get set }
-    var onFirstHDR10PlusDetected: (() -> Void)? { get set }
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)? { get set }
     var skipUntilPTS: CMTime? { get set }
 
     func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws
