@@ -105,7 +105,8 @@ await player.seek(to: 120)
 player.stop()
 
 // State (Combine @Published)
-player.$state          // .idle, .loading, .playing, .paused, .seeking, .error
+player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, .error
+                       // .ended = played to completion (any backend); .idle = pre-load / stopped
 player.$duration
 player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs)

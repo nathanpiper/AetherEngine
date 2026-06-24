@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **End-of-media is now surfaced to hosts as `PlaybackState.ended` (#63).** Each playback host already tracked `didReachEnd`, but the engine consumed it internally and collapsed the public surface to `.idle`, indistinguishable from pre-load or `stop()`. Hosts that want end-of-playback behavior (mark-watched, autoplay-next, dismiss) could only work around it on the native path by observing the handed-out `AVPlayer` for `AVPlayerItemDidPlayToEndTime`; on the software-decode path there is no public `AVPlayer`, so there was no recourse at all. The engine now has a dedicated terminal state, `PlaybackState.ended`, set on end-of-media across every backend (native / software / audio); `stop()` still goes to `.idle`. `.ended` is terminal: `seek` / `togglePlayPause` are no-ops, and the next `load(...)` clears it. **Source-compatibility:** this adds a case to the public `PlaybackState` enum, so exhaustive `switch` statements over it must add a `case .ended` (or an `@unknown default`).
+
 ## [3.13.4] — 2026-06-24
 
 ### Fixed

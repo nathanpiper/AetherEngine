@@ -1150,8 +1150,9 @@ public final class AetherEngine: ObservableObject {
 
     public func seek(to seconds: Double) async {
         // Guard: a host scrub racing stop() must not flip an idle/error engine to .seeking -> .playing.
+        // .ended is terminal too: after end-of-media the host reloads to replay, it does not scrub a parked session.
         switch state {
-        case .idle, .error:
+        case .idle, .ended, .error:
             EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: no active session (state=\(state))", category: .engine)
             return
         case .loading:

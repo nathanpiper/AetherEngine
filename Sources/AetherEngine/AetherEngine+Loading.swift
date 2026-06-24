@@ -36,7 +36,7 @@ extension AetherEngine {
             .store(in: &cancellables)
         didReachEnd
             .filter { $0 }
-            .sink { [weak self] _ in self?.state = .idle }
+            .sink { [weak self] _ in self?.state = .ended }
             .store(in: &cancellables)
     }
 
@@ -94,7 +94,9 @@ extension AetherEngine {
             .sink { [weak self] status in
                 guard let self = self else { return }
                 if case .error = self.state { return }
-                if self.state == .idle { return }
+                // .ended is terminal like .idle: a late .waitingToPlayAtSpecifiedRate from AVPlayer parked at
+                // end must not flip it back to .loading (live HLS can reach real end-of-media).
+                if self.state == .idle || self.state == .ended { return }
                 // isBuffering only once playing (not during live startup spin-up).
                 self.isBuffering = self.state == .playing && status == .waitingToPlayAtSpecifiedRate
                 switch status {
@@ -753,7 +755,7 @@ extension AetherEngine {
                 guard self.playbackBackend == .native,
                       let host = self.nativeHost else { return }
                 if case .error = self.state { return }
-                if self.state == .idle { return }
+                if self.state == .idle || self.state == .ended { return }
                 if host.isReady { return }
                 if servingSince == nil,
                    let session = self.nativeVideoSession,

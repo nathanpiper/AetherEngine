@@ -3,11 +3,18 @@ import CoreGraphics
 
 /// The playback state of a `AetherEngine` instance.
 public enum PlaybackState: Sendable, Equatable {
+    /// No session: pre-load, or torn down via `stop()`. Distinct from `.ended` (see below).
     case idle
     case loading
     case playing
     case paused
     case seeking
+    /// The source played to completion on its own. Terminal, like `.idle`, but reached by reaching
+    /// end-of-media rather than by `stop()`. Surfaced on every backend (native / software / audio) so a
+    /// host can run end-of-playback handling (mark-watched, autoplay-next, dismiss) without observing the
+    /// AVPlayer directly, which is impossible on the software-decode path (#63). Cleared by the next
+    /// `load(...)`. Transport calls (`seek`, `togglePlayPause`) are no-ops here; reload to replay.
+    case ended
     case error(String)
 }
 
