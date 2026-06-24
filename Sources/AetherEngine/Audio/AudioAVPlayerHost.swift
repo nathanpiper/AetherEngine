@@ -151,6 +151,9 @@ final class AudioAVPlayerHost {
                     // (some MP4/M4A), disable it so nothing decodes it on the audio path. FLAC/MP3 embedded pictures
                     // usually arrive as common metadata (no track here), which auto-publish-off already covers.
                     self.disableEmbeddedImageTracks(on: item)
+                    // Now that the item is bound + ready, publish the staged Now-Playing entry (writes were gated
+                    // off during the swap to avoid the MediaPlayer serial-queue assertion).
+                    self.publishNowPlaying()
                     if let seek = self.pendingSeek {
                         self.pendingSeek = nil
                         await self.avPlayer.seek(
@@ -226,9 +229,8 @@ final class AudioAVPlayerHost {
         }
 
         avPlayer.replaceCurrentItem(with: item)
-        // Auto-publish is off, so seed the session's Now-Playing entry for this item now (the host has already
-        // staged metadata via setNowPlayingInfo before load()).
-        publishNowPlaying()
+        // Do NOT publish Now-Playing here: the item is still binding and not yet ready, and writing the session
+        // center mid-swap trips dispatch_assert_queue_fail. The readyToPlay edge publishes the first entry.
         // No auto-play: the engine calls play() after load(), mirroring
         // AudioPlaybackHost.
     }
@@ -271,12 +273,19 @@ final class AudioAVPlayerHost {
 
     /// Publish the full Now-Playing entry (metadata + current elapsed/rate/duration) to the session's own center.
     /// MainActor-pinned (the host is @MainActor); never touches MPNowPlayingInfoCenter.default(). Clears on empty.
+    ///
+    /// Gated on `isReady`: writing the center while replaceCurrentItem is still binding the new item (the window
+    /// that widens on a slow/remote source, e.g. a second track from an external server) trips
+    /// dispatch_assert_queue_fail in MediaPlayer's setter. So all writes wait until the item is bound + ready; the
+    /// readyToPlay edge fires the first publish, and play/pause/seek/periodic refresh follow once ready. An empty
+    /// dict (clear) always goes through, even pre-ready, since clearing the entry can't collide with item binding.
     private func publishNowPlaying() {
         #if os(iOS) || os(tvOS)
         guard !pendingNowPlayingInfo.isEmpty else {
             nowPlayingSession.nowPlayingInfoCenter.nowPlayingInfo = nil
             return
         }
+        guard isReady else { return }
         var info = pendingNowPlayingInfo
         if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
@@ -286,10 +295,11 @@ final class AudioAVPlayerHost {
     }
 
     /// Light refresh: patch only elapsed/rate/duration on the existing entry (no artwork re-ship). Driven by the
-    /// 4 Hz time observer so the scrubber moves and a pause publishes rate 0. No-op until the first full publish.
+    /// 4 Hz time observer so the scrubber moves and a pause publishes rate 0. No-op until the first full publish
+    /// (and pre-ready, matching publishNowPlaying's gate).
     private func refreshNowPlayingTiming() {
         #if os(iOS) || os(tvOS)
-        guard !pendingNowPlayingInfo.isEmpty,
+        guard isReady, !pendingNowPlayingInfo.isEmpty,
               var info = nowPlayingSession.nowPlayingInfoCenter.nowPlayingInfo else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = rate
