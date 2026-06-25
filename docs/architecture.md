@@ -119,13 +119,16 @@ Sources/AetherEngine/
 │   ├── LiveTelemetrySampler.swift           @MainActor 1 Hz sampler that reads existing subsystem counters and assembles LiveTelemetry snapshots
 │   └── PacketBalanceTracker.swift           Process-wide AVPacket alloc/free balance counter for leak diagnostics
 ├── Disc/
-│   ├── DiscReader.swift                     Disc detection + routing: local `.iso` URLs and custom ISO readers into the demux path (DVD vs Blu-ray)
+│   ├── DiscReader.swift                     Disc detection + routing: local `.iso` URLs and custom ISO readers into the demux path; enumerates titles and threads the selected one (DVD vs Blu-ray)
+│   ├── DiscMetadata.swift                   Public `TitleInfo` / `ChapterInfo` plus the internal disc title + chapter model (45 kHz ticks, extent keys)
 │   ├── ISO9660Reader.swift                  Read-only ISO9660 bridge-filesystem reader (DVD-Video images)
-│   ├── DVDTitleSelector.swift               Selects the longest DVD title set by VOB size
+│   ├── DVDIFOParser.swift                   DVD VMGI TT_SRPT title list + each VTS IFO program chain (per-title duration + chapters)
+│   ├── DVDTitleSelector.swift               Groups DVD title sets' content VOBs into selectable titles (whole-VTS, largest first)
 │   ├── ConcatIOReader.swift                 Synthetic seekable IOReader concatenating byte extents (DVD VOBs / Blu-ray M2TS clips) into one source
 │   ├── UDFReader.swift                      Read-only UDF 2.50 reader (Blu-ray BDMV, including the metadata partition and fragmented-file allocation descriptors)
-│   ├── MPLSParser.swift                     Blu-ray `.mpls` playlist parser (title metadata)
-│   └── BDTitleSelector.swift               Selects the main Blu-ray title from the longest `.mpls` playlist
+│   ├── MPLSParser.swift                     Blu-ray `.mpls` playlist parser (clips, duration, PlayListMark chapters)
+│   ├── BDTitleSelector.swift               Enumerates Blu-ray playlists as selectable titles (longest first; short menu / decoy playlists filtered)
+│   └── DiscInspector.swift                  Diagnostic mirror of `DiscReader.wrap` for `aetherctl disc-inspect` (titles, chapters, recognition stages)
 ├── Display/
 │   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints (native path)
 │   └── FrameRateSnap.swift                  Snap to standard rates (23.976, 24, 25, 29.97, 30, 50, 59.94, 60)

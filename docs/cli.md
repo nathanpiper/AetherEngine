@@ -11,6 +11,7 @@ swift run aetherctl dovitest <url>       # convert a DV Profile 7 stream to 8.1,
 swift run aetherctl extract <url>        # FrameExtractor still-image extraction + leak testing
 swift run aetherctl audio [--seconds N] <url>   # audio-only pipeline smoke test (default 10 s)
 swift run aetherctl customio <path>      # exercise the custom IOReader path end-to-end
+swift run aetherctl disc-inspect <path>  # walk a local DVD / Blu-ray ISO: titles, chapters, recognition stages
 swift run aetherctl live                 # live MPEG-TS session against the built-in fixture
 swift run aetherctl dvr                  # DVR rewind matrix across native + SW paths
 swift run aetherctl hlsfixture <ts>      # local HLS live fixture with fault knobs + ingest self-test
@@ -84,6 +85,10 @@ Plays a source through the audio-only pipeline (default ten seconds, `--seconds 
 ## customio
 
 Wraps a local file in a custom `IOReader` and plays it through `load(source:)`. `--memory` reads via `DataIOReader`, `--forward-only` drops the seek capability, and `--reload` / `--switch-audio` / `--select-subs` / `--extract` exercise the optional capabilities (background reload, audio-track switch, embedded subtitles, scrub preview) end-to-end.
+
+## disc-inspect
+
+Walks a local DVD-Video or Blu-ray ISO at the filesystem layer (FFmpeg-free) and reports what `DiscReader.wrap` makes of it: the recognition verdict and the stages it went through (ISO9660 / UDF signatures, BDMV / VIDEO_TS contents, resolved extents), so a disc that fails to play is debuggable instead of surfacing a bare `INVALIDDATA`. It also prints the full selectable-title list with each title's duration and chapter offsets (the same titles + chapters the engine exposes via `discTitles` / `discChapters`). Exit 0 when the image is recognized as playable, else 1. `--dump` adds the verbose UDF volume structure under the `.demux` log.
 
 ## dualsubs
 

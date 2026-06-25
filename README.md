@@ -38,7 +38,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Area | Summary |
 | --- | --- |
 | Containers | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV |
-| Disc | DVD-Video and Blu-ray ISO (decrypted): main title only, demuxed through the normal path |
+| Disc | DVD-Video and Blu-ray ISO (decrypted): selectable titles and chapters, demuxed through the normal path |
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 where HW AV1 exists |
 | Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1; bwdif deinterlace |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG |
@@ -135,6 +135,13 @@ player.selectSecondarySidecarSubtitle(url: srt2URL)
 player.clearSecondarySubtitle()
 player.$secondarySubtitleCues                  // [SubtitleCue] for the secondary track
 player.$isSecondarySubtitleActive             // Bool
+
+// Disc titles + chapters (DVD-Video / Blu-ray ISO; empty for non-disc sources)
+player.$discTitles                             // [TitleInfo]: id, name, durationSeconds, chapterCount (longest first, id 0 is the main feature)
+player.$selectedDiscTitle                      // TitleInfo?
+player.selectTitle(id: titleID)                // switch title (rebuilds from the new title's head)
+player.$discChapters                           // [ChapterInfo] for the selected title
+player.selectChapter(id: chapterID)            // seek to a chapter
 
 // Info panel / Now Playing (iOS / tvOS)
 player.setExternalMetadata([ AVMetadataItem(/* title, artwork, etc. */) ])
@@ -260,7 +267,7 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 
 - **[docs/architecture.md](docs/architecture.md)** — the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
 - **[docs/formats.md](docs/formats.md)** — codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
-- **[docs/cli.md](docs/cli.md)** — the `aetherctl` repro CLI (fifteen subcommands).
+- **[docs/cli.md](docs/cli.md)** — the `aetherctl` repro CLI (sixteen subcommands).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release index.
 
 ## Stability and versioning
