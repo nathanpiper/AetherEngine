@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.1.0] — 2026-06-25
+
+### Added
+
+- **Disc title and chapter selection for DVD-Video and Blu-ray (#67).** A disc image now exposes every selectable title and the chapters of the playing title, and the host can switch between them. `engine.discTitles` lists the titles (Blu-ray playlists / DVD title sets, longest first so id 0 is the main feature) with each one's duration and chapter count; `engine.selectedDiscTitle` is the active one; `engine.selectTitle(id:)` switches title, rebuilding from the new title's head (the selection survives audio-track switches and background resume, and a fresh `load` defaults to the main title). `engine.discChapters` carries the selected title's chapters and `engine.selectChapter(id:)` seeks to one (a thin seek, no pipeline rebuild). Blu-ray titles and chapters come from the MPLS playlists and their PlayListMark entries; DVD titles, durations, and chapters come from the VMGI TT_SRPT and each title set's program chain (whole-VTS resolution, per-cell / episodic splitting deferred). Chapter starts are title-relative and `selectChapter` rebases them onto the playback clock (the native playlist shift, or the software path's container start PTS) so the seek lands. A new `discTitleID` parameter on `load` opens a disc straight to a chosen title, and `aetherctl disc-inspect` prints the full title + chapter list for a local image.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.1.0))
+
 ## [4.0.7] — 2026-06-25
 
 ### Added
