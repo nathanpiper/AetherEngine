@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.2.0] — 2026-06-26
+
+### Added
+
+- **Caller-bounded demux probe budget per `load()` (#68).** A large remote remux with sparse streams (HDMV PGS subtitles, an mjpeg cover attachment) makes `avformat_find_stream_info` read to the full internal probe budget (50 MB / 60 s) on every open, costing roughly 13-14 s before the first frame over a slow CDN even though the video and audio streams resolve almost immediately. That budget is tuned for local disk, where reading 50 MB is free, and a remote caller had no way to cap it. Two optional `LoadOptions` fields now let a caller cap the open-time probe, both defaulting to `nil` so nothing changes unless set: `probesize` (bytes, maps to `AVFormatContext.probesize`) and `maxAnalyzeDuration` (microseconds, maps to `AVFormatContext.max_analyze_duration`). The cap is applied to every main-playback open that runs `find_stream_info` (the routing probe that becomes the session demuxer, the software and audio fallback opens, the audio/title-switch reopens so a switch does not re-incur the cost, and the native HLS fallback open and live reopen) and only to those: the subtitle side-demuxer, the routing `probe(url:)` API, the Dolby Vision probe, still extraction, and the live companion-audio demuxer all keep the full budget because a complete probe is load-bearing there (sparse PGS / DVB track detection). An over-tight budget fails open (a late-resolving track is silently missing), not closed; `maxAnalyzeDuration: 0` is FFmpeg's shorter heuristic, not "no cap". Both trade-offs are documented on the fields. Internally, `DemuxerOpenProfile.withProbeBudget(probesize:maxAnalyzeDuration:)` overrides only the two probe knobs and leaves the AVIO tuning untouched.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.2.0))
+
 ## [4.1.0] — 2026-06-25
 
 ### Added
