@@ -1398,7 +1398,10 @@ public final class AetherEngine: ObservableObject {
         guard let session = nativeVideoSession else { return }
         Task.detached {
             let idx = session.segmentIndexForPlaylistTime(seconds)
-            session.requestRestart(at: idx)
+            // #79: authoritative re-anchor. `seconds` is AVPlayer's REAL rendered position (the clock was
+            // just reconciled to it), so it must win the coalescer over any stale in-flight scrub target.
+            // Without this a burst-tail scrub overrode it and the producer stayed ~1600s off the playhead.
+            session.requestRestart(at: idx, authoritative: true)
         }
     }
 

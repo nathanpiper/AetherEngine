@@ -110,8 +110,10 @@ extension HLSVideoEngine {
             + "\(String(format: "%.2f", pos))s -> seg\(idx) (attempt \(attempts)/\(Self.maxConsecutiveWedgeReanchors))",
             category: .session
         )
-        // requestRestart coalesces with any in-flight restart (#35); already off the main actor here.
-        requestRestart(at: idx)
+        // #79: re-anchor authoritatively. It is computed from AVPlayer's REAL position, so it must win the
+        // coalescer's pending slot over any stale in-flight scrub target (else the producer settles at the
+        // scrub target, not where the clock was reconciled to, and AVPlayer stays starved).
+        requestRestart(at: idx, authoritative: true)
     }
 
     private func performLiveReopen(failedProducer: HLSSegmentProducer) async {
