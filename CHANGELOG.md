@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.5.2] — 2026-06-26
+
+### Fixed
+
+- **A user pause was misread as a backpressure wedge, deadlocking the loopback-HLS VOD path (#65).** The 4.2.2 wedge-breaker re-anchors the producer when the consumer's fetch target freezes. A paused AVPlayer freezes that target legitimately (it issues no forward fetch by design), so a pause longer than ~24 s on a bridged-audio loopback-HLS title (TrueHD, DTS-HD MA, or any codec that routes through the FLAC/EAC3 bridge) tripped the breaker. The re-anchor loop then ran against a player that cannot advance, exhausted its attempts, and left the producer re-anchored ahead of a buffer stranded behind the playhead, a state resume could not recover (force-quit required). Wedge detection now gates on play intent: it tracks `timeControlStatus` and suspends while the player is paused, so a pause of any length never trips it and the window after resume starts fresh. A genuine starved wedge (the player wants to play but is buffer-starved, `waitingToPlay`) still trips, and the seek-deadline reconcile gets the same pause guard so a paused scrub is not mistaken for a starved seek. Thanks to rrgomes and reckloon for the independent captures and the precise root-cause analysis.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.5.2))
+
 ## [4.5.1] — 2026-06-26
 
 ### Fixed
