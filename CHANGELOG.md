@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.3.0] — 2026-06-26
+
+### Added
+
+- **First-frame audio selection by language preference (#72).** A host that wants a saved audio-language preference honored on the first frame previously had to open the source an extra time to pick the track (an audio pre-probe) or reload via `selectAudioTrack` after load. Each extra open re-runs `avformat_open_input` + `find_stream_info` + the size probe, multiplying pre-first-frame latency and request volume against a remote source. New `LoadOptions.preferredAudioLanguages` (ordered; ISO 639-1 / 639-2 codes or English names, e.g. `["en", "de"]`; default empty) lets the engine resolve the audio track from its single internal probe: an explicit `audioSourceStreamIndex` still wins, else the first track matching a preference in order (case-insensitive, ISO 639-1/2 B+T and English-name synonyms), else the container default. The resolved index drives the played audio on both the native and software paths. Empty preferences with no override is a behavioral no-op, so nothing changes until a host opts in; a probe-failed source still honors an explicit override verbatim. The engine already reuses its single probe demuxer as the session demuxer, so honoring the preference here removes the remaining redundant open for the prefer-a-language case. Thanks to reckloon for the request and the staged-reuse framing.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.3.0))
+
 ## [4.2.3] — 2026-06-26
 
 ### Fixed
