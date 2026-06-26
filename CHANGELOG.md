@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.5.1] — 2026-06-26
+
+### Fixed
+
+- **Head-of-stream audio muxed ahead of video was dropped, causing a constant ~1 s A/V desync (#74).** On the native loopback-HLS path the producer's audio gate dropped every audio packet that arrived before the first video packet. On a wide-interleave source (audio muxed ~1 s ahead of video in file order, e.g. a progressive MP4 whose leading second of AAC precedes the first video packet) that discarded the entire leading second of real audio, so AVPlayer pulled the survivors forward into a constant ~1 s lag (the same file stays in sync in VLC / Infuse). The producer now buffers that pre-gate audio (bounded by an 8 MB cap) and replays it in DTS order once the video gate opens, so it flows through the normal target-filter / anchor / write path. Scoped to head-of-stream; restart and seek producers keep the original drop, where the post-gate shift already anchors their surviving audio. Thanks to reckloon for the report and the corrected root-cause analysis.
+
+- **An unresolvable cover-art stream made remote open read to the full probe budget (#75).** A remote MP4 carrying an embedded cover-art stream (mjpeg reported as 0x0) kept `avformat_find_stream_info` reading toward `probesize` (tens of MB pulled over the network) trying to resolve codec parameters that never resolve, even though the real H.264 + AAC streams were available almost immediately. Attached-picture streams are now reclassified to `AVMEDIA_TYPE_ATTACHMENT` before stream-info probing, so they resolve instantly and the probe stops once the real streams are known. Cover-art extraction is unaffected (it reads the attached picture plus the unchanged disposition). Thanks to reckloon for the report.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.5.1))
+
 ## [4.5.0] — 2026-06-26
 
 ### Added
