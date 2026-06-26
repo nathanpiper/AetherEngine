@@ -871,15 +871,20 @@ public final class AetherEngine: ObservableObject {
         let sourceProbe: SourceProbe? = probeOpened
             ? Self.makeSourceProbe(demuxer: probe, displayURL: url)
             : nil
-        // Resolve the initial audio track: host override takes precedence; invalid override falls back to auto.
-        // nil when source has no audio (host can hide the picker without recomputing).
-        let resolvedInitialAudio: Int32
-        if let override = audioSourceStreamIndex,
-           probedAudioTracks.contains(where: { $0.id == Int(override) }) {
-            resolvedInitialAudio = override
-        } else {
-            resolvedInitialAudio = probedDefaultAudioIndex
-        }
+        // Resolve the initial audio track: an explicit host override wins, else the ordered language
+        // preference (#72) resolved from this single probe. selectedAudio is nil when neither applies,
+        // so the session keeps its own default pick (empty preferences + no override is a behavioural
+        // no-op). Passing selectedAudio into session start lets the host honor a saved language on the
+        // first frame without a separate pre-probe or a selectAudioTrack reload.
+        // On probe failure (probedAudioTracks empty) the override can't be validated, so honor it
+        // verbatim and let the reopened session re-validate it: an explicit audioSourceStreamIndex
+        // still wins (the contract), matching pre-#72 behavior where the raw override was passed through.
+        let selectedAudio = Self.selectAudioIndex(
+            tracks: probedAudioTracks,
+            override: audioSourceStreamIndex,
+            preferredLanguages: options.preferredAudioLanguages
+        ) ?? (probeOpened ? nil : audioSourceStreamIndex)
+        let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
         activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
         let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
         EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) source-format=\(detectedFormat) effective-format=\(effectiveFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
@@ -1053,7 +1058,7 @@ public final class AetherEngine: ObservableObject {
                     url: url,
                     sourceHTTPHeaders: options.httpHeaders,
                     startPosition: startPosition,
-                    audioSourceStreamIndex: audioSourceStreamIndex,
+                    audioSourceStreamIndex: selectedAudio,
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
@@ -1080,7 +1085,7 @@ public final class AetherEngine: ObservableObject {
                     url: url,
                     sourceHTTPHeaders: options.httpHeaders,
                     startPosition: startPosition,
-                    audioSourceStreamIndex: audioSourceStreamIndex,
+                    audioSourceStreamIndex: selectedAudio,
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: panelHDRAfterHandshake,

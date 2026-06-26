@@ -232,6 +232,62 @@ extension AetherEngine {
         }
     }
 
+    // MARK: - Audio track selection (#72)
+
+    /// Resolve the audio stream index selected by an explicit host `override` or, failing that, the
+    /// ordered `preferredLanguages` policy. Returns nil when neither applies, so the caller keeps the
+    /// container / session default pick (i.e. an empty preference list with no override is a no-op,
+    /// behaviourally identical to before #72). Pure and nonisolated so a host can avoid a separate
+    /// audio pre-probe or a post-load `selectAudioTrack` reload (#72).
+    nonisolated static func selectAudioIndex(
+        tracks: [TrackInfo],
+        override: Int32?,
+        preferredLanguages: [String]
+    ) -> Int32? {
+        // Explicit host override wins, but only when it names a real audio track (else fall through).
+        if let override, tracks.contains(where: { $0.id == Int(override) }) {
+            return override
+        }
+        // Each preference is scanned across all tracks in order, so an earlier preference on a later
+        // track still beats a later preference on an earlier track.
+        for preferred in preferredLanguages {
+            if let match = tracks.first(where: { audioLanguageMatches($0.language, preferred) }) {
+                return Int32(match.id)
+            }
+        }
+        return nil
+    }
+
+    /// Case-insensitive audio-language match across ISO 639-1 / 639-2 (B and T) / English name, e.g.
+    /// `"en" == "eng" == "english"`, `"de" == "deu" == "ger"`. Empty / nil track language never matches.
+    /// Pure and unit-tested (#72).
+    nonisolated static func audioLanguageMatches(_ trackLanguage: String?, _ preferred: String) -> Bool {
+        guard let track = trackLanguage?.lowercased().trimmingCharacters(in: .whitespaces),
+              !track.isEmpty else { return false }
+        let want = preferred.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !want.isEmpty else { return false }
+        if track == want { return true }
+        return languageSynonyms.contains { $0.contains(track) && $0.contains(want) }
+    }
+
+    /// ISO 639-1 / 639-2/T / 639-2/B equivalence classes (plus common English names); anything outside
+    /// falls back to strict equality. Mirrors the host-side table so engine-resolved selection matches
+    /// what hosts computed before #72.
+    nonisolated static let languageSynonyms: [Set<String>] = [
+        ["de", "deu", "ger", "german"], ["en", "eng", "english"], ["fr", "fra", "fre", "french"],
+        ["es", "spa", "spanish"], ["it", "ita", "italian"], ["ja", "jpn", "japanese"],
+        ["ko", "kor", "korean"], ["zh", "zho", "chi", "chinese"], ["pt", "por", "portuguese"],
+        ["ru", "rus", "russian"], ["nl", "nld", "dut", "dutch"], ["sv", "swe", "swedish"],
+        ["da", "dan", "danish"], ["no", "nor", "norwegian"], ["nb", "nob"], ["nn", "nno"],
+        ["fi", "fin", "finnish"], ["pl", "pol", "polish"], ["cs", "ces", "cze", "czech"],
+        ["hu", "hun", "hungarian"], ["tr", "tur", "turkish"], ["el", "ell", "gre", "greek"],
+        ["ar", "ara", "arabic"], ["he", "heb", "hebrew"], ["hi", "hin", "hindi"],
+        ["id", "ind", "indonesian"], ["th", "tha", "thai"], ["vi", "vie", "vietnamese"],
+        ["uk", "ukr", "ukrainian"], ["ro", "ron", "rum", "romanian"], ["sk", "slk", "slo", "slovak"],
+        ["hr", "hrv", "croatian"], ["bg", "bul", "bulgarian"], ["sr", "srp", "serbian"],
+        ["pt-br", "por"], ["pt-pt", "por"],
+    ]
+
     // MARK: - Decoder identity helpers
 
     /// User-facing label for the active video decoder. nil when no video track (AV_CODEC_ID_NONE). Native = VideoToolbox HW; SW = dav1d (AV1) or libavcodec (VP9, MPEG-2, VC-1).
