@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.6.2] — 2026-06-27
+
+### Changed
+
+- **Subtitle and audio track switches on a remote ISO no longer re-open the source (#76).** Selecting a subtitle track, switching audio, or seeking re-opened a demuxer, and every open re-ran disc recognition: the UDF / ISO9660 directory parse plus a read of every `.mpls` (Blu-ray) or `.IFO` (DVD) over HTTP. On a disc with dozens of playlists that round-tripped many times per switch, which the reporter saw as the "disc tray" reopening on each subtitle change. Two changes remove it. (1) `DiscReader.wrap` now memoizes the parsed disc structure (title list + clip extents) per source URL and selected title, so a reopen rebuilds only the cheap concat reader and skips the directory re-parse; the main pump, the subtitle side demuxer, and the audio reload share one cache, so recognition runs once per session. (2) For URL sources the subtitle side demuxer is retained per source + title and reused across track switches and seeks: the open container is re-seeked to the new playhead and re-pointed at the new stream index, with no re-open or re-probe. A successor reader hands off from its predecessor before touching the shared demuxer, so they never read it concurrently. Custom sources (SMB) still open per switch but benefit from the recognition cache.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.6.2))
+
 ## [4.6.1] — 2026-06-27
 
 ### Fixed
