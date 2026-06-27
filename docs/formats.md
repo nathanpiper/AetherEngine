@@ -64,11 +64,12 @@ Matroska CodecPrivate doesn't usually carry the pre-parsed `dec3` / `dac3` box c
 
 ## Subtitles
 
-Subtitle packets are routed through the same demux loop as audio and video. No second AVIO connection, no full-file scan. Each packet decodes inline through `avcodec_decode_subtitle2`, the result lands in a single `[SubtitleCue]` published list:
+Subtitle packets are routed through the same demux loop as audio and video. No second AVIO connection, no full-file scan. Each packet decodes inline through `avcodec_decode_subtitle2` (the one exception is in-band CEA-608, which has no FFmpeg decoder and is handled by a producer tap, see below), the result lands in a single `[SubtitleCue]` published list:
 
 - **Text codecs** (SubRip / ASS / SSA / WebVTT / mov_text) → `SubtitleCue.body = .text(String)`. ASS dialogue headers and override blocks (`{\an8}`, `{\b1}`, ...) are stripped; `\N` becomes a real newline so the host can render with regular text layout.
 - **Bitmap codecs** (PGS / HDMV PGS / DVB / DVD) → `.image(SubtitleImage)`. The indexed pixel plane is walked through its palette, premultiplied against alpha, and wrapped as a `CGImage`. Position is normalised in `[0..1]` against the source video frame so the host scales to any on-screen rect.
 - **Sidecar files** (a separate `.srt` / `.ass` / `.vtt` URL) → `selectSidecarSubtitle(url:httpHeaders:)` opens its own short-lived `AVFormatContext`, decodes the whole file once, atomically swaps the result into `subtitleCues`. The fetch forwards the session's `LoadOptions.httpHeaders` by default (WebDAV auth and friends); pass the call's own `httpHeaders` to override per fetch.
+- **In-band CEA-608 closed captions** (`eia_608` / QuickTime `c608`, a demuxable caption track) → `.text(String)`. FFmpegBuild ships no `ccaption` decoder, so these never reach `avcodec_decode_subtitle2` (the side-demuxer open fails and the track sits active-but-blank). Instead a read-only tap on the segment producer's existing source connection reads the caption track's `cc_data` (its packets are kept in the demuxer's keep-set, observed, then dropped, never muxed, so the loopback-HLS output stays byte-identical), an in-house line-21 decoder (validated against FFmpeg's `ccaption_dec.c`) turns it into cues, and they publish on the same `subtitleCues` overlay path as every other codec. First cut: field-1 / channel CC1; CEA-708 (DTVCC) and field 2 are follow-ons. Captions carried only in the H.264 SEI with no separate track are out of scope. Host-overlay only (no PiP / AirPlay), like the bitmap codecs. (#77)
 
 ### Track selection by language preference
 
