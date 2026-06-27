@@ -205,9 +205,16 @@ extension AetherEngine {
         )
     }
 
-    /// Pure, nonisolated, and unit-testable: audio-only path when the host requested it OR the probe found no video stream.
-    nonisolated static func shouldUseAudioOnlyPath(audioOnlyRequested: Bool, hasVideoStream: Bool) -> Bool {
-        audioOnlyRequested || !hasVideoStream
+    /// Pure, nonisolated, and unit-testable: audio-only path when the host requested it OR a *successful* probe
+    /// genuinely found no video stream.
+    ///
+    /// A failed probe (`probeOpened == false`) must NOT route here. probeOpened false means we never looked, not
+    /// that there is no video; conflating the two silently degrades a real video file to the audio-only backend
+    /// when the open-time probe loses to a transient origin 429 (#78). On probe failure the caller falls through
+    /// to the native path so HLSVideoEngine reopens and discovers the stream (it demonstrably can).
+    nonisolated static func shouldUseAudioOnlyPath(audioOnlyRequested: Bool, probeOpened: Bool, hasVideoStream: Bool) -> Bool {
+        if audioOnlyRequested { return true }
+        return probeOpened && !hasVideoStream
     }
 
     /// Whitelist (not blacklist) of AVPlayer-native audio codecs: AAC, MP3, MP2, ALAC, AC-3/E-AC-3, LPCM, FLAC (native since iOS/tvOS 11). Anything else falls back to `AudioPlaybackHost` (FFmpeg).

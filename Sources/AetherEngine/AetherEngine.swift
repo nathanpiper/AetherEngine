@@ -903,7 +903,7 @@ public final class AetherEngine: ObservableObject {
         //     Native sub-branch closes the probe and reopens via AVPlayer; FFmpeg sub-branch reuses the probe
         //     (required for custom sources).
         let hasVideoStream = probeOpened && probe.videoStreamIndex >= 0
-        if Self.shouldUseAudioOnlyPath(audioOnlyRequested: options.audioOnly, hasVideoStream: hasVideoStream) {
+        if Self.shouldUseAudioOnlyPath(audioOnlyRequested: options.audioOnly, probeOpened: probeOpened, hasVideoStream: hasVideoStream) {
             // Read codec before closing the probe; custom sources always use FFmpeg (AVPlayer can't consume a custom demuxer).
             let audioCodecID: AVCodecID = (probeOpened && resolvedInitialAudio >= 0)
                 ? (probe.stream(at: resolvedInitialAudio)?.pointee.codecpar.pointee.codec_id ?? AV_CODEC_ID_NONE)
@@ -958,6 +958,15 @@ public final class AetherEngine: ObservableObject {
                 throw error
             }
             return sourceProbe
+        }
+
+        // Reaching here with a failed probe means a non-audioOnly URL source whose open-time probe lost to a
+        // transient origin error (custom + live already fail-fast above). Don't degrade to audio-only (#78):
+        // dispatch native on codec NONE (the default switch arm) with a nil preopenedDemuxer so HLSVideoEngine
+        // reopens and discovers the real stream. Format/codec stay at their .sdr/NONE defaults; AVKit fires the
+        // criteria from the AVPlayerItem formatDescription once the reopened stream lands.
+        if !probeOpened {
+            EngineLog.emit("[AetherEngine] probe failed; falling through to the native video path (HLSVideoEngine will reopen and discover the stream) rather than degrading to audio-only", category: .engine)
         }
 
         // 2. Display-criteria handshake. Use effective format so a non-DV panel isn't asked to switch to dvh1.
