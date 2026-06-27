@@ -457,6 +457,10 @@ public final class Demuxer: @unchecked Sendable {
         let codecName: String
         if let codec = avcodec_find_decoder(codecpar.pointee.codec_id) {
             codecName = String(cString: codec.pointee.name)
+        } else if let namePtr = avcodec_get_name(codecpar.pointee.codec_id) {
+            // No decoder built (e.g. eia_608): fall back to the codec-descriptor name so the track is
+            // identifiable. #77 routes in-band CEA-608/708 on this name ("eia_608").
+            codecName = String(cString: namePtr)
         } else {
             codecName = "unknown"
         }

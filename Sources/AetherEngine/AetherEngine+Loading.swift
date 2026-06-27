@@ -255,7 +255,10 @@ extension AetherEngine {
         // Each text track becomes one mov_text track in the init moov (#55, all-tracks). Sidecar entries append at runtime; this table is embedded-only.
         // Bitmap codecs excluded via the shared decoder-name classifier (a prior exact-match Set used descriptor
         // names that never matched TrackInfo.codec's decoder names, so PGS/DVB/DVD leaked in as mov_text).
-        let textTracks = subtitleTracks.filter { !Self.isBitmapSubtitleCodec($0.codec) }
+        // Exclude in-band CEA-608/708 (#77): no demuxable packets to mux into mov_text; served by the CC tap.
+        let textTracks = subtitleTracks.filter {
+            !Self.isBitmapSubtitleCodec($0.codec) && !Self.isEmbeddedClosedCaptionCodec($0.codec)
+        }
         nativeSubtitleTrackTable = textTracks.map { track in
             NativeSubtitleTrackEntry(sourceStreamIndex: track.id, language: track.language)
         }
@@ -272,6 +275,9 @@ extension AetherEngine {
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
         session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
+
+        // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.
+        setupClosedCaptionTapIfNeeded(session: session)
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
         let playbackURL = try await Task.detached(priority: .userInitiated) { [session] in

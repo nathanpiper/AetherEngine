@@ -314,6 +314,14 @@ extension AetherEngine {
             .contains(where: { c.contains($0) })
     }
 
+    /// True when the codec is an in-band CEA-608/708 caption track (`eia_608` / QuickTime `c608`). These
+    /// have no FFmpeg decoder, so they bypass the side-demuxer `EmbeddedSubtitleDecoder` and are served by
+    /// the producer CC tap, which parses their `cc_data` directly. (#77)
+    nonisolated static func isEmbeddedClosedCaptionCodec(_ codec: String) -> Bool {
+        let c = codec.lowercased()
+        return c == "eia_608" || c == "eia_708" || c == "cea708" || c == "cea_708"
+    }
+
     /// Case-insensitive language match across ISO 639-1 / 639-2 (B and T) / English name, e.g.
     /// `"en" == "eng" == "english"`, `"de" == "deu" == "ger"`. Empty / nil track language never matches.
     /// Shared by audio (#72) and subtitle (#73) language selection. Pure and unit-tested.

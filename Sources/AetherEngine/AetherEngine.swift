@@ -476,6 +476,12 @@ public final class AetherEngine: ObservableObject {
     /// Active embedded subtitle stream index, or -1. Used by seek to decide whether to re-arm the side demuxer.
     var activeEmbeddedSubtitleStreamIndex: Int32 = -1
 
+    /// #77: in-band CEA-608 tap state. The tap owns the cue buffer and publishes snapshots; `ccCueSnapshot`
+    /// is the latest, mirrored into `subtitleCues` while the CC track is active.
+    var closedCaptionTap: ClosedCaptionTap?
+    var ccCueSnapshot: [SubtitleCue] = []
+    var ccLastSnapshotSeq: Int = 0
+
     /// Secondary subtitle reader state mirrors (#47). Driven only through SubtitleChannel.secondary.
     var secondarySidecarTask: Task<Void, Never>?
     var secondaryEmbeddedSubtitleTask: Task<Void, Never>?
@@ -1369,15 +1375,22 @@ public final class AetherEngine: ObservableObject {
         // Re-arm the embedded subtitle side demuxer at the new playhead.
         if activeEmbeddedSubtitleStreamIndex >= 0, let url = loadedURL {
             let streamIdx = activeEmbeddedSubtitleStreamIndex
-            cancelEmbeddedSubtitleReader()
-            subtitleCues = []
-            // Custom sources: clone the reader; skip re-arm if the reader can't produce a clone (forward-only).
-            if isCustomSource {
-                if let clone = customReader?.makeIndependentReader() {
-                    startEmbeddedSubtitleTask(url: url, reader: clone, formatHint: customFormatHint, streamIndex: streamIdx, startAt: target)
-                }
+            // #77: in-band CC is fed by the producer CC tap, which rides the producer across the seek.
+            // Just tell it to drop stale decoder/cue state at this discontinuity; it republishes as the
+            // re-anchored producer re-pumps. No side demuxer to re-arm.
+            if activeSubtitleStreamIsClosedCaption(streamIdx) {
+                closedCaptionTap?.requestReset()
             } else {
-                startEmbeddedSubtitleTask(url: url, reader: nil, formatHint: nil, streamIndex: streamIdx, startAt: target)
+                cancelEmbeddedSubtitleReader()
+                subtitleCues = []
+                // Custom sources: clone the reader; skip re-arm if the reader can't produce a clone (forward-only).
+                if isCustomSource {
+                    if let clone = customReader?.makeIndependentReader() {
+                        startEmbeddedSubtitleTask(url: url, reader: clone, formatHint: customFormatHint, streamIndex: streamIdx, startAt: target)
+                    }
+                } else {
+                    startEmbeddedSubtitleTask(url: url, reader: nil, formatHint: nil, streamIndex: streamIdx, startAt: target)
+                }
             }
         }
 

@@ -69,6 +69,15 @@ extension AetherEngine {
         activeEmbeddedSubtitleStreamIndex = Int32(index)
         activeSubtitleTrackIndex = index
 
+        // #77: in-band CEA-608/708 is fed by the always-on producer CC tap (set up at load), not a side
+        // demuxer. Selecting it just makes it the active track and mirrors the tap's cue snapshot.
+        if let codec = subtitleTracks.first(where: { $0.id == index })?.codec,
+           Self.isEmbeddedClosedCaptionCodec(codec) {
+            isLoadingSubtitles = false
+            subtitleCues = ccCueSnapshot
+            return
+        }
+
         // Native mov_text rendition (#55, all-tracks) is fed by the dedicated multi-decode reader at load; this inline path only drives subtitleCues for the host overlay.
         // startAt is the unified source-PTS playhead; pre-fold AVPlayer clock would land playlistShiftSeconds early ("subs 3-5 s late" repro on Cars with ~3.92 s shift).
         startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: startAt)

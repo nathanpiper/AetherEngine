@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **In-band CEA-608 closed captions from a demuxable caption track, rendered through the host overlay (#77).** A source whose only caption track is an embedded CEA-608 stream (`eia_608`, e.g. a QuickTime/MP4 `c608` track) previously could not render: FFmpegBuild ships no `ccaption` decoder, so the side-demuxer `EmbeddedSubtitleDecoder` open failed and the track sat active-but-blank (`subActive=true / subCues=0`). The engine now reads that caption track's `cc_data` off the segment producer's existing source connection — a read-only observer keeps the `eia_608` stream in the demuxer's keep-set, hands each of its packets to an external `ClosedCaptionTap`, then drops it (never muxed → the loopback-HLS segment output is byte-identical to the no-CC path). An in-house CEA-608 decoder (pop-on / roll-up / paint-on, PAC row addressing, mid-row codes, and the basic / special / extended West-European character sets; odd-parity validation, doubled-control suppression and the character / PAC tables validated against FFmpeg's `ccaption_dec.c`) turns the bytes into cues published on the same `subtitleCues` host-overlay path as every other side-decoded subtitle codec. Because the tap owns the cue buffer and rides the producer (re-threaded onto every restart via `makeProducer`), captions appear instantly on enable — no second demuxer, no extra connection — and survive seek / reload / wedge. The native `mov_text` rendition (#55) is untouched: CC is excluded from that path (it can't become `tx3g`) and rendered through the overlay like the bitmap subtitle codecs, so — as with those — it is host-overlay only (no PiP / AirPlay CC). First cut: 608 field-1 / channel CC1; CEA-708 (DTVCC) and field 2 are follow-ons. Thanks to DrHurt for the externalise-subtitles steer.
+
 ## [4.5.7] — 2026-06-27
 
 ### Fixed

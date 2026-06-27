@@ -446,6 +446,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// BCP-47 language tags parallel to subtitleCueStores; nil entry = no language box.
     var nativeSubtitleLanguages: [String?] = []
 
+    /// #77: in-band CC tap. When `closedCaptionStreamIndex >= 0` that source stream is kept (not
+    /// discarded) and each of its packets is handed to `closedCaptionObserver` (read-only) then dropped —
+    /// never muxed (output byte-identical). Set via init so it's in the keep-set; observer attached after.
+    var closedCaptionStreamIndex: Int32 = -1
+    var closedCaptionObserver: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
+    private var closedCaptionStreamTimeBase = AVRational(num: 1, den: 1)
+
     /// Must be set before first allocateMuxer call. Enables mov_text track declaration in init moov (#55).
     var enableNativeSubtitleTrack: Bool = false
 
@@ -512,6 +519,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         videoFallbackDurationPts: Int64,
         audioFallbackDurationPts: Int64 = 0,
         restartTargetVideoDts: Int64 = Int64.min,
+        closedCaptionStreamIndex: Int32 = -1,
         desiredFirstVideoTfdtPts: Int64,
         desiredFirstAudioTfdtPts: Int64 = 0,
         segmentBoundaries: [Int64],
@@ -529,6 +537,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         }
         self.videoStreamIndex = videoStreamIndex
+        self.closedCaptionStreamIndex = closedCaptionStreamIndex   // #77: before the discard block below
         self.videoConfig = video
         self.convertP7Active = video.convertP7ToProfile81
         self.audioConfig = audio
@@ -553,7 +562,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // Discard streams we don't read (matroska queues PGS bitmaps, secondary audio -- heap churn).
         // Dual-demuxer: side audio index can alias a main-demuxer stream, so keep sets are split.
         if let side = sideAudioDemuxer {
-            demuxer.discardAllStreamsExcept([videoStreamIndex])
+            var keep: Set<Int32> = [videoStreamIndex]
+            if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
+            demuxer.discardAllStreamsExcept(keep)
             if let audio = audio {
                 side.discardAllStreamsExcept([audio.sourceStreamIndex])
             }
@@ -562,7 +573,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if let audio = audio {
                 keep.insert(audio.sourceStreamIndex)
             }
+            if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
             demuxer.discardAllStreamsExcept(keep)
+        }
+        // #77: cache the CC stream's time_base for the observer's PTS conversion.
+        if closedCaptionStreamIndex >= 0 {
+            closedCaptionStreamTimeBase = demuxer.stream(at: closedCaptionStreamIndex)?.pointee.time_base
+                ?? AVRational(num: 1, den: 1)
         }
 
         let audioDesc = audio.map { a -> String in
@@ -1301,6 +1318,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 } else {
                     isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
                 }
+                // #77: hand the in-band caption-track packet to the observer (read-only). It's a foreign
+                // packet (the eia_608/c608 caption stream) and is dropped below — never muxed.
+                if pktStreamIdx == closedCaptionStreamIndex, let observe = closedCaptionObserver {
+                    observe(packet, closedCaptionStreamTimeBase)
+                }
+
                 if packet.pointee.dts == Int64.min {
                     let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
                                       : isAudioPkt ? lastAudioSourceDts

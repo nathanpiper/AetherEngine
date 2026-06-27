@@ -105,6 +105,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// nil entry = no language box for that track.
     var nativeSubtitleLanguagesForSession: [String?] = []
 
+    /// #77: in-band CC stream index + observer, re-threaded onto every producer so the tap survives
+    /// seek/reload/wedge. Set before start(). -1 / nil = no CC tap.
+    var closedCaptionStreamIndexForSession: Int32 = -1
+    var closedCaptionObserverForSession: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
+
     /// Request the native mov_text track in the init moov (#55). Call before `start()`.
     /// `aetherctl serve --native-subs N` uses this; a full session wires it automatically.
     public func requestNativeSubtitleTrack() {
@@ -1170,6 +1175,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoFallbackDurationPts: videoFallbackDurationPts,
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoDts: videoTarget,
+            closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             desiredFirstVideoTfdtPts: desiredVideoTfdt,
             desiredFirstAudioTfdtPts: desiredAudioTfdt,
             segmentBoundaries: segmentBoundaries,
@@ -1200,6 +1206,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.enableNativeSubtitleTrack = enableNativeSubtitleTrackForSession
         prod.subtitleCueStores = nativeSubtitleCueStoresForSession
         prod.nativeSubtitleLanguages = nativeSubtitleLanguagesForSession
+        prod.closedCaptionObserver = closedCaptionObserverForSession   // #77
         return prod
     }
 
