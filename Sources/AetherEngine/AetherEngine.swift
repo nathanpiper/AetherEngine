@@ -1504,13 +1504,12 @@ public final class AetherEngine: ObservableObject {
         didSet { observeExternalPlayback() }
     }
 
-    /// AirPlay (#86, DrHurt): observe the native AVPlayer's external-playback flag. While AirPlaying, the
-    /// loopback stream must be reachable by the receiver, so swap the playback URL host from 127.0.0.1 to the
-    /// device's LAN IP (the server binds all interfaces) and reload; swap back when it ends. Loopback path
-    /// only; a remote-HLS source is already reachable by the receiver, so it is left untouched.
+    /// AirPlay (#86, DrHurt): true while the native AVPlayer reports external playback. loadNative reads it to
+    /// serve the loopback over the device's LAN IP (the receiver can't reach 127.0.0.1) AND to force the MEDIA
+    /// playlist (AVPlayer rejects a DV/HDR MASTER playlist on an SDR receiver and won't auto-switch, DrHurt).
+    /// Loopback native path only; a remote-HLS source is already receiver-reachable, so it's left untouched.
+    private(set) var airPlayActive = false
     private var externalPlaybackObservation: NSKeyValueObservation?
-    /// True while loadedURL's host is the LAN IP (swapped for AirPlay), so we only revert what we swapped.
-    private var loopbackUsingLANHost = false
 
     private func observeExternalPlayback() {
         externalPlaybackObservation?.invalidate()
@@ -1523,25 +1522,24 @@ public final class AetherEngine: ObservableObject {
     }
 
     private func handleExternalPlaybackChange(active: Bool) {
-        func swap(_ url: URL, _ host: String) -> URL? {
-            var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            c?.host = host
-            return c?.url
-        }
-        if active {
-            guard !loopbackUsingLANHost, let url = loadedURL, url.host == "127.0.0.1",
-                  let lanIP = HLSLocalServer.localActiveIPAddress(), let lanURL = swap(url, lanIP) else { return }
-            EngineLog.emit("[AirPlay] external playback active -> reload via LAN host \(lanIP)", category: .engine)
-            loadedURL = lanURL
-            loopbackUsingLANHost = true
-            Task { try? await reloadAtCurrentPosition() }
-        } else {
-            guard loopbackUsingLANHost, let url = loadedURL, let backURL = swap(url, "127.0.0.1") else { return }
-            EngineLog.emit("[AirPlay] external playback ended -> reload via loopback", category: .engine)
-            loadedURL = backURL
-            loopbackUsingLANHost = false
-            Task { try? await reloadAtCurrentPosition() }
-        }
+        guard active != airPlayActive else { return }
+        airPlayActive = active
+        // Loopback native path only: remote-HLS is already receiver-reachable. Reload so loadNative rebuilds
+        // the playback URL on the LAN IP + media playlist (active) or back on 127.0.0.1 master/media (inactive).
+        guard playbackBackend == .native, !loadedOptions.nativeRemoteHLS, loadedURL != nil else { return }
+        EngineLog.emit("[AirPlay] external playback \(active ? "active -> LAN media reload" : "ended -> loopback reload")", category: .engine)
+        Task { try? await reloadAtCurrentPosition() }
+    }
+
+    /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP and force the MEDIA
+    /// playlist, so the receiver reaches the engine-processed stream and isn't handed a DV/HDR master it rejects
+    /// on an SDR panel (DrHurt). nil if no LAN IP (caller keeps the original 127.0.0.1 URL).
+    func airPlayPlaybackURL(base: URL) -> URL? {
+        guard let lanIP = HLSLocalServer.localActiveIPAddress() else { return nil }
+        var c = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        c?.host = lanIP
+        c?.path = "/media.m3u8"
+        return c?.url
     }
 
     #if os(tvOS) || os(iOS)

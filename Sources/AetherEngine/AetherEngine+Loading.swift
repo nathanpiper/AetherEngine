@@ -280,9 +280,19 @@ extension AetherEngine {
         setupClosedCaptionTapIfNeeded(session: session)
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
-        let playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
+        var playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
             try session.start()
         }.value
+        #if os(iOS)
+        // AirPlay (#86): while external playback is active, serve the loopback over the device's LAN IP and
+        // force the media playlist, so the receiver reaches the engine-processed stream (DV/Atmos/subtitles
+        // preserved) and isn't handed a DV/HDR master it rejects on an SDR panel (DrHurt). Reverts on the
+        // reload when AirPlay ends.
+        if airPlayActive, let lanURL = airPlayPlaybackURL(base: playbackURL) {
+            EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString)", category: .engine)
+            playbackURL = lanURL
+        }
+        #endif
         // Superseded while starting: stop and unwind before touching shared state.
         if loadGeneration != generation {
             session.stop()
