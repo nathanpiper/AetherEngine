@@ -1530,7 +1530,7 @@ public final class AetherEngine: ObservableObject {
         }
         if active {
             guard !loopbackUsingLANHost, let url = loadedURL, url.host == "127.0.0.1",
-                  let lanIP = HLSLocalServer.localWiFiIPAddress(), let lanURL = swap(url, lanIP) else { return }
+                  let lanIP = HLSLocalServer.localActiveIPAddress(), let lanURL = swap(url, lanIP) else { return }
             EngineLog.emit("[AirPlay] external playback active -> reload via LAN host \(lanIP)", category: .engine)
             loadedURL = lanURL
             loopbackUsingLANHost = true

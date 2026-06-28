@@ -137,25 +137,31 @@ final class HLSLocalServer: @unchecked Sendable {
         return URL(string: "http://127.0.0.1:\(port)/media.m3u8")
     }
 
-    /// The device's WiFi (en0) IPv4 address for the AirPlay LAN-host swap (#86). nil if en0 has no IPv4
-    /// (no WiFi / Ethernet-only) so the caller keeps 127.0.0.1. en0 is WiFi on Apple devices; per DrHurt's
-    /// caveat we use the physical IP only while AirPlaying, loopback otherwise.
-    static func localWiFiIPAddress() -> String? {
+    /// The device's active LAN IPv4 address for the AirPlay LAN-host swap (#86), or nil (caller keeps
+    /// 127.0.0.1). DrHurt's caveat: en0 isn't always the active interface on multi-NIC / Ethernet devices.
+    /// We scan `en*` interfaces (WiFi + wired Ethernet/Thunderbolt; cellular pdp_ip*, VPN utun*, AirDrop awdl*
+    /// are excluded by the prefix) and prefer en0 (WiFi on Apple devices), falling back to the lowest-numbered
+    /// wired en* otherwise. Synchronous getifaddrs (NWPathMonitor is async and would stall the reload path);
+    /// the rare both-WiFi-and-Ethernet case picks WiFi, which is the usual AirPlay route.
+    static func localActiveIPAddress() -> String? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(ifaddr) }
+        var byInterface: [String: String] = [:]
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let flags = Int32(ptr.pointee.ifa_flags)
             guard (flags & (IFF_UP | IFF_RUNNING | IFF_LOOPBACK)) == (IFF_UP | IFF_RUNNING),
-                  let sa = ptr.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
-                  String(cString: ptr.pointee.ifa_name) == "en0" else { continue }
+                  let sa = ptr.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: ptr.pointee.ifa_name)
+            guard name.hasPrefix("en") else { continue }
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
                            nil, 0, NI_NUMERICHOST) == 0 {
-                return String(cString: host)
+                byInterface[name] = String(cString: host)
             }
         }
-        return nil
+        if let wifi = byInterface["en0"] { return wifi }
+        return byInterface.keys.sorted().compactMap { byInterface[$0] }.first
     }
 
     /// Number of segments currently published.
