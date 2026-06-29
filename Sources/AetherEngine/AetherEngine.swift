@@ -1074,9 +1074,18 @@ public final class AetherEngine: ObservableObject {
         } else {
             panelHDRAfterHandshake = displayCriteria.currentPanelIsHDR()
         }
+        #if os(iOS)
+        // The iPhone built-in display has no HDMI Match-Content handshake; it renders HDR/DV natively
+        // whenever the system reports it eligible. effectiveFormat is already clamped to displayCapabilities
+        // (the same signal that drives the served DV/HDR stream), so publish it directly. Gating on
+        // panelHDRAfterHandshake (false on iOS, kept for media-playlist routing) wrongly relabelled every
+        // HDR/DV title as SDR in Stats for Nerds.
+        videoFormat = effectiveFormat
+        #else
         videoFormat = (effectiveFormat != .sdr && panelHDRAfterHandshake)
             ? effectiveFormat
             : .sdr
+        #endif
 
         // 3. Dispatch by codec.
         //    Native: HEVC/H.264 (unconditional) and AV1 on platforms with HW decode (iOS 17+/macOS 14+).
