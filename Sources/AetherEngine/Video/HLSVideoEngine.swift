@@ -951,7 +951,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // subtitles. HDR-on-SDR-panel and DV5-on-non-DV-panel stay media-direct (no PiP subs) to avoid
         // -11848 / -11868; the subtitle rendition is orthogonal to the video VIDEO-RANGE/CODECS attributes.
         let hasNativeSubs = enableNativeSubtitleTrackForSession && !nativeSubtitleCueStoresForSession.isEmpty
-        let routingSafeForMaster = !sourceIsHDR || panelReadyForHDR
+        // A SDR variant (VIDEO-RANGE=SDR) is routable on any panel, so the master is safe to force for it;
+        // HDR/DV only when the panel is HDR-ready. Gate on the ACTUAL videoRange, not sourceIsHDR: sourceIsHDR
+        // is inflated by effectiveDvMode (a device DV capability) even for SDR content, which wrongly sent SDR
+        // sources on DV-capable devices to media-direct, so the WebVTT rendition never appeared (#15).
+        let routingSafeForMaster = (videoRange == .sdr) || panelReadyForHDR
         let useMasterPlaylist: Bool
         if dv5OnNonDVPanel {
             useMasterPlaylist = false
