@@ -190,6 +190,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `playlistShiftSeconds` onto the source-PTS `seekTarget`.
     var onSeekStateChanged: (@Sendable (Bool, Double?) -> Void)?
 
+    /// Source stall/reconnect transitions from the main demuxer's `AVIOReader` (#85). Forwarded to
+    /// `demuxer` at every install site (start + live/restart reopen); the side-audio demuxer stays unwired.
+    var onNetworkPhaseChanged: (@Sendable (ReaderNetworkPhase) -> Void)?
+
     /// AVPlayer's rendered (playlist-axis) position, readable off the main actor. Wired by AetherEngine
     /// to a thread-safe mirror of the host clock. Used to re-anchor the producer on AVPlayer's REAL
     /// position when a VOD backpressure wedge breaks (#65).
@@ -392,6 +396,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
         demuxer = dem
+        dem.onNetworkPhaseChanged = onNetworkPhaseChanged   // surface source stall/reconnect to playbackPhase (#85)
 
         let videoIndex = dem.videoStreamIndex
         guard videoIndex >= 0, let videoStream = dem.stream(at: videoIndex) else {
@@ -1443,7 +1448,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         // #79: install the reopened demuxer only inside the validated section so makeProducer reads it and a
         // concurrent teardown can't race a resurrected demuxer into a torn-down session.
-        if let freshDemuxer { demuxer = freshDemuxer }
+        if let freshDemuxer {
+            demuxer = freshDemuxer
+            freshDemuxer.onNetworkPhaseChanged = onNetworkPhaseChanged   // re-wire stall signal onto the reopened demuxer (#85)
+        }
         do {
             let newProd = try makeProducer(baseIndex: idx)
             producer = newProd

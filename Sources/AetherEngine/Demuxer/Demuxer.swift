@@ -105,6 +105,14 @@ public final class Demuxer: @unchecked Sendable {
         (avioProvider as? AVIOReader)?.lastUnplannedReconnectAt
     }
 
+    /// Forwarded to the playback `AVIOReader` so source stall/reconnect transitions reach the engine (#85).
+    /// `didSet` re-forwards so it works whether set before or after `open()`. Set only on the playback
+    /// demuxer; the subtitle side-demuxer leaves it nil so its stalls never move `playbackPhase`. Disc /
+    /// custom providers without an `AVIOReader` simply never emit.
+    var onNetworkPhaseChanged: (@Sendable (ReaderNetworkPhase) -> Void)? {
+        didSet { (avioProvider as? AVIOReader)?.onNetworkPhaseChanged = onNetworkPhaseChanged }
+    }
+
     // MARK: - Disc titles / chapters (#67)
 
     private(set) var discTitles: [DiscTitle] = []
@@ -225,6 +233,7 @@ public final class Demuxer: @unchecked Sendable {
             chunkRequestTimeout: openProfile.avioRequestTimeout,
             chunkMaxRetries: openProfile.avioMaxRetries
         )
+        reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         try openWithProvider(reader, isLive: isLive)
     }
 
