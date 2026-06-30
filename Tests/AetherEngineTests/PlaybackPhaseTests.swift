@@ -103,3 +103,25 @@ struct PlaybackPhaseEngineTests {
         #expect(engine.playbackPhase == .playing)
     }
 }
+
+/// The reader-side dedupe gate: emit only when the phase actually changes, so a flapping origin
+/// does not spam the callback. Demux-thread-only, no locking (#85).
+@Suite("NetworkPhaseGate (#85)")
+struct NetworkPhaseGateTests {
+
+    @Test("does not emit the initial flowing state")
+    func suppressesInitialFlowing() {
+        var gate = NetworkPhaseGate()
+        #expect(gate.shouldEmit(.flowing) == false)
+    }
+
+    @Test("emits on transition and suppresses repeats")
+    func emitsOnlyOnChange() {
+        var gate = NetworkPhaseGate()
+        #expect(gate.shouldEmit(.reconnecting) == true)
+        #expect(gate.shouldEmit(.reconnecting) == false)
+        #expect(gate.shouldEmit(.flowing) == true)
+        #expect(gate.shouldEmit(.flowing) == false)
+        #expect(gate.shouldEmit(.reconnecting) == true)
+    }
+}

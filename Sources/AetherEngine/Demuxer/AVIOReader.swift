@@ -13,6 +13,18 @@ import Libavutil
 ///
 /// AVIO callbacks run on the demux queue; prefetch/delivery on background queues.
 /// Shared state protected by locks.
+
+/// Dedupes `ReaderNetworkPhase` emissions so a flapping origin does not spam the callback (#85).
+/// Mutated only on the demux thread (the read loop), so it needs no locking.
+struct NetworkPhaseGate {
+    private var last: ReaderNetworkPhase = .flowing
+    mutating func shouldEmit(_ next: ReaderNetworkPhase) -> Bool {
+        guard next != last else { return false }
+        last = next
+        return true
+    }
+}
+
 final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     private let url: URL
@@ -35,6 +47,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
+
+    /// Typed source-fetch network phase, pushed on every stall/reconnect/recovery transition (#85).
+    /// Mirrors `HLSVideoEngine.onSeekStateChanged`. `@Sendable`: invoked from the demux thread, the
+    /// consumer hops to the main actor. Set only on the MAIN playback reader, never the subtitle side reader.
+    var onNetworkPhaseChanged: (@Sendable (ReaderNetworkPhase) -> Void)?
+
+    /// Demux-thread-only dedupe for `onNetworkPhaseChanged`.
+    private var networkPhaseGate = NetworkPhaseGate()
+
+    /// Emit a phase transition through the gate (demux thread only).
+    private func emitNetworkPhase(_ phase: ReaderNetworkPhase) {
+        if networkPhaseGate.shouldEmit(phase) {
+            onNetworkPhaseChanged?(phase)
+        }
+    }
 
     /// Cached CDN URL after redirect resolution; skips proxy hop on subsequent chunks.
     /// Auth-expiry statuses (401/403/404/410) against it invalidate and fall back to
@@ -710,6 +737,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         totalRead += n
                         unproductiveReconnects = 0
                         rateLimitStreak = 0
+                        emitNetworkPhase(.flowing)   // detour cache served: not stalled (#85)
                         detourTrackSequential(at: curPosition, length: n)
                         continue
                     case .rateLimited(let retryAfter):
@@ -748,6 +776,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 trimWindowLocked()
                 unproductiveReconnects = 0      // real progress
                 rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
+                emitNetworkPhase(.flowing)      // recovered: source delivering again (#85)
                 winCond.broadcast()              // window may have shrunk: wake backpressure
                 winCond.unlock()
                 continue
@@ -779,6 +808,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         totalRead += n
                         unproductiveReconnects = 0
                         rateLimitStreak = 0
+                        emitNetworkPhase(.flowing)   // detour cache served: not stalled (#85)
                         detourTrackSequential(at: curPosition, length: n)
                         continue
                     case .rateLimited, .miss:
@@ -800,6 +830,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if !signaled {
                     if recordReconnectAndShouldGiveUp() {
                         EngineLog.emit("[AVIOReader] Persistent stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
+                        emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                         if isLive {
                             return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                         }
@@ -807,6 +838,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     }
                     EngineLog.emit("[AVIOReader] Persistent stall at offset \(frontier), reconnecting", category: .demux)
                     lastUnplannedReconnectAt = Date()
+                    emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
                     backoffBeforeReconnect(streak: unproductiveReconnects, retryAfter: 0)
                     startPersistentConnection(at: frontier)
                 }
@@ -824,6 +856,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if giveUp {
                 let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive 429/503" : "\(unproductiveReconnects) unproductive"
                 EngineLog.emit("[AVIOReader] Persistent reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
+                emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                 if isLive {
                     return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                 }
@@ -832,6 +865,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let backoffStreak = isRateLimited ? rateLimitStreak : unproductiveReconnects
             EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
+            emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
             backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
             startPersistentConnection(at: frontier)
         }
