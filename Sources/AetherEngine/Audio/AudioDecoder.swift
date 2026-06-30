@@ -33,6 +33,11 @@ final class AudioDecoder: @unchecked Sendable {
     private var pendingStartPTS: CMTime = .invalid
     private var pendingSampleCount: Int = 0
 
+    /// Gapless presentation clock (issue #89): stamps each buffer from a running sample count so
+    /// consecutive buffers abut to the sample, instead of from each buffer's container-quantized PTS
+    /// (which clicks at every frame for non-integer-ms frame durations like 1536-sample AC-3 @ 44.1 kHz).
+    private var clock = AudioClockAnchor()
+
     #if DEBUG
     private var _loggedZeroConvert = false
     #endif
@@ -170,6 +175,8 @@ final class AudioDecoder: @unchecked Sendable {
         avcodec_flush_buffers(ctx)
         // Drop the coalesced samples; after a seek they'd be at the wrong PTS anyway.
         resetPending()
+        // Re-anchor the gapless clock to the post-seek PTS on the next emitted buffer.
+        clock.reset()
         #if DEBUG
         _loggedZeroConvert = false
         #endif
@@ -356,12 +363,18 @@ final class AudioDecoder: @unchecked Sendable {
             return nil
         }
 
+        // Gapless PTS (issue #89): derive this buffer's start from the running sample count so
+        // consecutive buffers abut exactly, instead of from the container-quantized PTS (which leaves
+        // +/-0.5 ms gaps and per-frame clicks for non-integer-ms frame durations). Committed only on
+        // success below, so a dropped buffer never advances the clock.
+        let (outPTS, reanchor) = clock.resolve(startPTS: startPTS, sampleRate: sampleRate)
+
         // Single timing entry: CoreMedia treats `duration` as per-SAMPLE, so LPCM must be 1/sampleRate. Stamping
         // the buffer total made GetDuration report totalSamples^2/sampleRate (~22s for 1024 samples), wedging
         // AudioPlaybackHost's buffer-ahead gate after one packet.
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: sampleRate),
-            presentationTimeStamp: startPTS,
+            presentationTimeStamp: outPTS,
             decodeTimeStamp: .invalid
         )
 
@@ -382,6 +395,7 @@ final class AudioDecoder: @unchecked Sendable {
         )
         resetPending()
         guard status == noErr, let sample = sampleBuffer else { return nil }
+        clock.commit(pts: outPTS, reanchor: reanchor, sampleCount: totalSamples)
         return sample
     }
 
