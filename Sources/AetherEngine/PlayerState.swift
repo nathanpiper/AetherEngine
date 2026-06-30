@@ -31,6 +31,56 @@ public enum PlaybackBackend: String, Sendable, Equatable {
     case audio
 }
 
+/// What playback is doing right now, as one observable (#85). Derived from `state`, `isBuffering`,
+/// `isSeeking`, and the reader network phase, so it can never desync from them. Observe `$playbackPhase`
+/// instead of stitching `state == .loading` + `$isBuffering` + `$isSeeking` together, and instead of
+/// regex-matching `EngineLog` for stall/reconnect, which is no longer necessary.
+///
+/// `.stalled(reconnecting:)` reports a source-connection problem (drop / 429 / 503 backoff) distinct from
+/// `.rebuffering` (a healthy-connection buffer underrun). The associated value is `true` whenever the
+/// reader is retrying; a future "stalled, retries paused" distinction will surface as `false` without
+/// changing the case. Not available on the direct AVPlayer-HLS live path (no demuxer / reader): a reconnect
+/// there reads as `.rebuffering`.
+public enum PlaybackPhase: Sendable, Equatable {
+    case idle
+    case loading
+    case playing
+    case paused
+    case seeking
+    case rebuffering
+    case stalled(reconnecting: Bool)
+    case ended
+    case error(String)
+}
+
+/// Source-fetch network axis feeding `PlaybackPhase` (#85). Binary today; `.reconnecting` covers the
+/// `AVIOReader` stall / drop / backoff loop, `.flowing` covers normal delivery.
+enum ReaderNetworkPhase: Sendable, Equatable {
+    case flowing
+    case reconnecting
+}
+
+extension PlaybackPhase {
+    /// Pure fold of the four playback axes into one phase, with fixed precedence
+    /// (highest first): error > ended > idle > loading > seeking > stalled > rebuffering > playing/paused.
+    static func derive(state: PlaybackState,
+                       isBuffering: Bool,
+                       isSeeking: Bool,
+                       stall: ReaderNetworkPhase) -> PlaybackPhase {
+        switch state {
+        case .error(let message): return .error(message)
+        case .ended:              return .ended
+        case .idle:               return .idle
+        case .loading:            return .loading
+        case .playing, .paused, .seeking:
+            if isSeeking { return .seeking }
+            if stall == .reconnecting { return .stalled(reconnecting: true) }
+            if isBuffering { return .rebuffering }
+            return state == .paused ? .paused : .playing
+        }
+    }
+}
+
 /// Static snapshot of what the current display can present. Single source of truth shared with the host.
 public struct DisplayCapabilities: Sendable, Equatable {
     public let supportsHDR: Bool

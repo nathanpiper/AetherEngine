@@ -209,6 +209,9 @@ extension AetherEngine {
                 self.setNativeScrubSeek(inFlight: inFlight, target: target)
             }
         }
+        session.onNetworkPhaseChanged = { [weak self] phase in
+            Task { @MainActor in self?.setReaderNetworkPhase(phase) }
+        }
         // #65: let the producer read AVPlayer's real position off-main when it re-anchors on a backpressure wedge.
         session.currentPlaybackPositionProvider = { [renderedPositionMirror] in renderedPositionMirror.get() }
         // #65 pause false-positive: let the producer read AVPlayer's play intent off-main so its backpressure
@@ -472,8 +475,12 @@ extension AetherEngine {
         // Capture the caller's probe budget (#68) before the detach: loadedOptions is @MainActor-isolated and unreachable inside the closure. Only used on the fallback open (probe absent).
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
+        // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
+        let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
+            Task { @MainActor in self?.setReaderNetworkPhase(phase) }
+        }
         try await Task.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
@@ -481,6 +488,7 @@ extension AetherEngine {
                 dem = Demuxer()
                 try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration), isLive: isLive)
             }
+            dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
                 demuxer: dem,
                 startPosition: startPosition,
@@ -534,8 +542,12 @@ extension AetherEngine {
         // Caller's probe budget (#68) captured before the detach; only used on the fallback open (probe absent).
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
+        // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
+        let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
+            Task { @MainActor in self?.setReaderNetworkPhase(phase) }
+        }
         try await Task.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
@@ -543,6 +555,7 @@ extension AetherEngine {
                 dem = Demuxer()
                 try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration))
             }
+            dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
                 demuxer: dem,
                 startPosition: startPosition,
