@@ -955,13 +955,21 @@ extension AetherEngine {
             if let stores = nativeSubtitleReaderParams?.stores, ordinal < stores.count {
                 let store = stores[ordinal]
                 let target = currentTime + 240.0
-                let deadline = Date().addingTimeInterval(12.0)
-                var lastMax = -1.0
+                let deadline = Date().addingTimeInterval(15.0)
+                var lastMax = 0.0
                 var stall = 0
                 while store.readMaxCueEnd() < target, Date() < deadline {
                     let m = store.readMaxCueEnd()
-                    if m <= lastMax { stall += 1 } else { stall = 0; lastMax = m }
-                    if stall >= 4 { break }
+                    if m > lastMax {
+                        lastMax = m
+                        stall = 0
+                    } else if lastMax > 0 {
+                        // Only treat a flat readMax as "reader done/parked" AFTER it has started producing;
+                        // before the first cue lands (seek + demux latency) readMax is legitimately 0, and an
+                        // early break would skip the pre-fill entirely (Sodalite#32 regression).
+                        stall += 1
+                    }
+                    if stall >= 6 { break }   // ~900ms with no new cues after producing => EOF / read-ahead parked
                     try? await Task.sleep(nanoseconds: 150_000_000)
                 }
                 EngineLog.emit("[PiPDiag] pre-fill done: readMax=\(String(format: "%.1f", store.readMaxCueEnd())) target=\(String(format: "%.1f", target)) cues=\(store.cueCount)", category: .engine)
