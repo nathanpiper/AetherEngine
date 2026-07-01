@@ -103,6 +103,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Serve the SUBTITLES rendition as one whole-program .vtt (Sodalite#32). Set before `start()`.
     var nativeSubtitleWholeProgram: Bool = false
 
+    /// Source position (seconds) the playback stream started at (resume/seek). Device-confirmed AVKit anchors a
+    /// whole-program VOD .vtt's time 0 to the stream start, so whole-program cues shift by this so cue-for-source-S
+    /// lands at currentTime S (from-start = 0 = no shift). Set before `start()`. Sodalite#32.
+    var subtitleStreamStartSeconds: Double = 0
+
     /// One cue store per declared text track (#55, all-tracks), ordinal-aligned with
     /// `nativeSubtitleLanguagesForSession`. Re-threaded onto every producer restart so
     /// per-segment cue drain survives seek/audio-switch. Empty = no native subtitles active.
@@ -920,7 +925,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             nativeSubtitleLanguages: nativeSubtitleLanguagesForSession,
             nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
             nativeSubtitleWholeProgram: nativeSubtitleWholeProgram,
-            currentShiftSeconds: { [weak self] in self?.playlistShiftSeconds ?? 0 }
+            currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) }
         )
         self.provider = prov
         if isLiveSession {

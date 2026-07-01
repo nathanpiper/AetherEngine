@@ -316,6 +316,9 @@ extension AetherEngine {
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
             session.nativeSubtitleWholeProgram = loadedOptions.eagerNativeSubtitleReaders && !loadedOptions.isLive
+            // Sodalite#32: AVKit anchors a whole-program VOD .vtt to the stream start, so shift whole-program
+            // cues by the resume/seek position (from-start = 0 = synced; device-confirmed).
+            session.subtitleStreamStartSeconds = startPosition ?? 0
             EngineLog.emit("[PiPDiag] default native ordinal=\(defaultOrdinal) wholeProgram=\(session.nativeSubtitleWholeProgram) prefLangs=\(loadedOptions.nativeSubtitlePreferredLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
         }
 
