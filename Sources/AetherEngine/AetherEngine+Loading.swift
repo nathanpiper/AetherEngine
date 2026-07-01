@@ -315,9 +315,12 @@ extension AetherEngine {
             nativeSubtitleDefaultOrdinal = defaultOrdinal
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
-            session.nativeSubtitleWholeProgram = loadedOptions.eagerNativeSubtitleReaders && !loadedOptions.isLive
-            // Sodalite#32: AVKit anchors a whole-program VOD .vtt to the stream start, so shift whole-program
-            // cues by the resume/seek position (from-start = 0 = synced; device-confirmed).
+            // Sodalite#32: whole-program renders reliably but is anchored to the stream start, so it breaks on
+            // scrub (the loopback producer-restarts + re-anchors the video on seek, but AVKit keeps the cached
+            // VOD .vtt). Use the WINDOWED shape (per-segment, 1:1 with the video segments) which AVKit re-fetches
+            // at each position and is seek-robust; combined now with a COMPLETE store (read-to-EOF) so no window
+            // is served empty (the earlier windowed sparse-fetch was tested with an incomplete parking reader).
+            session.nativeSubtitleWholeProgram = false
             session.subtitleStreamStartSeconds = startPosition ?? 0
             EngineLog.emit("[PiPDiag] default native ordinal=\(defaultOrdinal) wholeProgram=\(session.nativeSubtitleWholeProgram) prefLangs=\(loadedOptions.nativeSubtitlePreferredLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
         }
@@ -357,10 +360,11 @@ extension AetherEngine {
                 // empty when AVKit fetches it. Start them eagerly here so the cue stores fill from load, the way a
                 // static VOD subtitle file is fully present up front.
                 if loadedOptions.eagerNativeSubtitleReaders {
-                    // Sodalite#32: for a whole-program .vtt read from the start straight to EOF (no read-ahead
-                    // parking) so every cue is present and the store reports finished.
-                    startNativeSubtitleReaders(url: url, stores: stores, fromStart: session.nativeSubtitleWholeProgram)
-                    EngineLog.emit("[PiPDiag] eager readers started: stores=\(stores.count) fromStart=\(session.nativeSubtitleWholeProgram)", category: .engine)
+                    // Sodalite#32: read from the start straight to EOF (no read-ahead parking) so every windowed
+                    // segment is populated when AVKit fetches it. Cue data is tiny; decoupled from the .vtt shape.
+                    let readEOF = !loadedOptions.isLive
+                    startNativeSubtitleReaders(url: url, stores: stores, fromStart: readEOF)
+                    EngineLog.emit("[PiPDiag] eager readers started: stores=\(stores.count) fromStart=\(readEOF)", category: .engine)
                 }
             }
         }
