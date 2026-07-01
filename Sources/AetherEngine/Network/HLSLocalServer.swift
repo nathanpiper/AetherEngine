@@ -924,16 +924,14 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is
         // non-conformant for HLS). Orthogonal to the video VIDEO-RANGE/CODECS attributes.
-        // Sodalite#32: the rendition matching the host's preferred subtitle language is DEFAULT=YES; a host-
-        // selected legible track only renders if it is the group default (AVKit's AVSmartSubtitlesController
-        // hides a non-default legible selection as mute-only). The host selects `nativeSubtitleDefaultOrdinal`.
+        // Sodalite#32: DEFAULT=NO,AUTOSELECT=NO so AVKit never auto-selects a subtitle rendition in fullscreen
+        // (the on-frame overlay owns fullscreen subtitles). The host explicitly selects the matching rendition
+        // only on PiP entry and deselects it on PiP exit, so the two never double up.
         let subRenditions = provider.nativeSubtitleRenditions
-        let defaultOrdinal = provider.nativeSubtitleDefaultOrdinal
         for r in subRenditions {
             var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
             if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
-            let isDefault = (r.ordinal == defaultOrdinal)
-            mediaAttrs.append(contentsOf: ["DEFAULT=\(isDefault ? "YES" : "NO")", "AUTOSELECT=YES", "URI=\"subs_\(r.ordinal).m3u8\""])
+            mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO", "URI=\"subs_\(r.ordinal).m3u8\""])
             lines.append("#EXT-X-MEDIA:\(mediaAttrs.joined(separator: ","))")
         }
         if !subRenditions.isEmpty {
