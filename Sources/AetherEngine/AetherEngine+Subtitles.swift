@@ -990,9 +990,17 @@ extension AetherEngine {
             // pipeline is established; a selection made mid-playback updates state + downloads cues but is not
             // drawn until re-asserted. Deselect, hop one runloop, then reselect to force the renderer to attach
             // (documented workaround; the same effect a PiP round-trip had). Needs the manual-criteria pin above.
+            let itemID = String(UInt(bitPattern: ObjectIdentifier(item).hashValue) & 0xffff, radix: 16)
+            EngineLog.emit("[PiPDiag] select: item=\(itemID) opt=\(option.displayName) groupOpts=\(group.options.count) criteriaAuto=\(currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically ?? true) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
             item.select(nil, in: group)
             try? await Task.sleep(nanoseconds: 100_000_000)
             item.select(option, in: group)
+            let after = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
+            EngineLog.emit("[PiPDiag] select done: selected=\(after) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
+            // Persistence probe: does AVSmartSubtitlesController drop it, or does it stay (renderer-attach issue)?
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            let later = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
+            EngineLog.emit("[PiPDiag] select +2.5s: selected=\(later) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
         }
     }
 
