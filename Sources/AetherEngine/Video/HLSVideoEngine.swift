@@ -100,6 +100,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// provider advertises this ordinal as the group default so a host-selected legible track renders.
     var nativeSubtitleDefaultOrdinal: Int = 0
 
+    /// Serve the SUBTITLES rendition as one whole-program .vtt (Sodalite#32). Set before `start()`.
+    var nativeSubtitleWholeProgram: Bool = false
+
     /// One cue store per declared text track (#55, all-tracks), ordinal-aligned with
     /// `nativeSubtitleLanguagesForSession`. Re-threaded onto every producer restart so
     /// per-segment cue drain survives seek/audio-switch. Empty = no native subtitles active.
@@ -915,7 +918,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             },
             nativeSubtitleStores: nativeSubtitleCueStoresForSession,
             nativeSubtitleLanguages: nativeSubtitleLanguagesForSession,
-            nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal
+            nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
+            nativeSubtitleWholeProgram: nativeSubtitleWholeProgram
         )
         self.provider = prov
         if isLiveSession {

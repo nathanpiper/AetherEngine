@@ -57,6 +57,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let nativeSubLanguages: [String?]
     /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
     let nativeSubtitleDefaultOrdinal: Int
+    /// Serve the SUBTITLES rendition as ONE whole-program .vtt (single VOD segment spanning the full duration)
+    /// instead of one .vtt per video segment. The only AVPlayer-reliable sideload shape (Sodalite#32); requires
+    /// eager readers (all cues available up front) and a bounded program (VOD).
+    let nativeSubtitleWholeProgram: Bool
 
     /// Synchronous teardown + relaunch at the given absolute segment index.
     private let restartHandler: ((Int) -> Void)?
@@ -112,7 +116,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         restartHandler: ((Int) -> Void)? = nil,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
         nativeSubtitleLanguages: [String?] = [],
-        nativeSubtitleDefaultOrdinal: Int = 0
+        nativeSubtitleDefaultOrdinal: Int = 0,
+        nativeSubtitleWholeProgram: Bool = false
     ) {
         self.cache = cache
         self.segments = segments
@@ -131,6 +136,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.nativeSubStores = nativeSubtitleStores
         self.nativeSubLanguages = nativeSubtitleLanguages
         self.nativeSubtitleDefaultOrdinal = nativeSubtitleDefaultOrdinal
+        self.nativeSubtitleWholeProgram = nativeSubtitleWholeProgram
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.
@@ -549,6 +555,26 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// window is read straight off the segment plan rather than recomputed.
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
         guard ordinal >= 0, ordinal < nativeSubStores.count else { return nil }
+        let store = nativeSubStores[ordinal]
+        if nativeSubtitleWholeProgram {
+            // Sodalite#32: serve the ENTIRE program's cues as one .vtt (the only AVPlayer-reliable sideload
+            // shape). AVKit fetches this VOD single-segment file ONCE and never re-fetches it, so wait for the
+            // eager reader to finish (cue-count plateau after it has produced) before returning, so the file is
+            // complete. Bounded; this is one fetch on the subtitle connection, not the per-segment pipeline.
+            var lastCount = -1
+            var stable = 0
+            let deadline = Date().addingTimeInterval(15.0)
+            while Date() < deadline {
+                let c = store.cueCount
+                if c > 0 && c == lastCount { stable += 1 } else { stable = 0 }
+                lastCount = c
+                if stable >= 8 { break }   // ~800ms with no new cues after producing => reader at EOF
+                usleep(100_000)
+            }
+            let cues = store.allCues()
+            EngineLog.emit("[PiPSubsDiag] whole-program ord=\(ordinal) cues=\(cues.count)", category: .hlsServer)
+            return WebVTTBuilder.segment(cues: cues, segmentStart: 0)
+        }
         stateLock.lock()
         guard segmentIndex >= 0, segmentIndex < segments.count else {
             stateLock.unlock()
@@ -561,7 +587,6 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         // processes requests per-connection serially and AVPlayer uses only 1-3 connections, so holding the
         // response serializes the legible-track pipeline. The native reader's large read-ahead keeps it ahead
         // of AVPlayer's prefetch so the window is already filled.
-        let store = nativeSubStores[ordinal]
         let cues = store.cuesInWindow(start: start, end: end)
         EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) readMax=\(String(format: "%.1f", store.readMaxCueEnd()))", category: .hlsServer)
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:

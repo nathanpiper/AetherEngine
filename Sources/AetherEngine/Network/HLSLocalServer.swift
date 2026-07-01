@@ -56,6 +56,8 @@ protocol HLSSegmentProvider: AnyObject {
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { get }
     /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
     var nativeSubtitleDefaultOrdinal: Int { get }
+    /// Serve the SUBTITLES rendition as one whole-program .vtt (single VOD segment) instead of per-video-segment (Sodalite#32).
+    var nativeSubtitleWholeProgram: Bool { get }
     /// WebVTT body for one subtitle SEGMENT (#15): cues whose window overlaps video segment `segmentIndex` of
     /// `ordinal`. nil if either index is out of range. The subtitle media playlist mirrors the video media
     /// playlist one segment per video segment, so the embedded reader (parked ~90s ahead of the playhead)
@@ -92,6 +94,7 @@ extension HLSSegmentProvider {
     var masterClosedCaptions: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
+    var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
     var liveTargetSegmentDuration: Double? { nil }
     var liveBlockingReloadEnabled: Bool { true }
@@ -955,6 +958,22 @@ final class HLSLocalServer: @unchecked Sendable {
         let snapshot = provider.notePlaylistBuild()
         let count = snapshot.visibleCount
         let firstVisible = min(snapshot.firstVisible, count)
+
+        // Sodalite#32: whole-program shape — ONE VOD segment spanning the full duration, one .vtt with all cues.
+        // The only AVPlayer-reliable sideload structure; the per-segment window made AVKit fetch a couple of
+        // sparse segments and never render. TARGETDURATION/EXTINF = full program length (Apple rules 5.5/8.7).
+        if provider.nativeSubtitleWholeProgram {
+            var total = 0.0
+            for i in firstVisible..<count { total += provider.segmentDuration(at: i) }
+            var lines: [String] = ["#EXTM3U", "#EXT-X-VERSION:7"]
+            lines.append("#EXT-X-TARGETDURATION:\(max(1, Int(ceil(total))))")
+            lines.append("#EXT-X-MEDIA-SEQUENCE:0")
+            lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
+            lines.append("#EXTINF:\(String(format: "%.3f", total)),")
+            lines.append("subs_\(ordinal)_0.vtt")
+            lines.append("#EXT-X-ENDLIST")
+            return lines.joined(separator: "\n") + "\n"
+        }
         let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
         let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded)
 

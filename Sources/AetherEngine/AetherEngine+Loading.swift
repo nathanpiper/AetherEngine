@@ -313,7 +313,10 @@ extension AetherEngine {
             }
             session.nativeSubtitleDefaultOrdinal = defaultOrdinal
             nativeSubtitleDefaultOrdinal = defaultOrdinal
-            EngineLog.emit("[PiPDiag] default native ordinal=\(defaultOrdinal) prefLangs=\(loadedOptions.preferredSubtitleLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
+            // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
+            // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
+            session.nativeSubtitleWholeProgram = loadedOptions.eagerNativeSubtitleReaders && !loadedOptions.isLive
+            EngineLog.emit("[PiPDiag] default native ordinal=\(defaultOrdinal) wholeProgram=\(session.nativeSubtitleWholeProgram) prefLangs=\(loadedOptions.nativeSubtitlePreferredLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
         }
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
