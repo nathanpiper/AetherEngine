@@ -438,6 +438,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
     }
 
+    /// Whether the pump-exit in-flight segment may be adopted into the cache. A teardown mid-VOD
+    /// (restart, wedge break, read error) leaves it PARTIAL: shorter content than the playlist's
+    /// EXTINF under a full segment's index, with video and audio ending at different interleave
+    /// drain points. Byte-budgeted retention keeps such a segment replayable (device: seeking back
+    /// to 0 played a teardown-partial with ~2 s of A/V split), so VOD adopts only the natural EOF
+    /// tail (a legitimately short final segment). Live always adopts: its playlist advertises the
+    /// ACTUAL duration via reportLiveSegmentFinalized, so a short live tail is not a lie.
+    static func shouldAdoptTeardownSegment(exitReason: PumpExitReason, isLive: Bool) -> Bool {
+        if isLive { return true }
+        if case .eof = exitReason { return true }
+        return false
+    }
+
     var onPumpFinished: (@Sendable (PumpExitReason) -> Void)?
 
     /// #65: reads whether AVPlayer currently wants to play (`timeControlStatus != .paused`), off the main
@@ -998,9 +1011,33 @@ final class HLSSegmentProducer: @unchecked Sendable {
         currentMuxerSegmentIndex = .min
     }
 
+    /// Finalize the muxer to release its context and staging file, but throw the partial segment
+    /// away instead of adopting it into the cache (see `shouldAdoptTeardownSegment`).
+    private func discardSessionMuxer() {
+        guard let muxer = currentMuxer else { return }
+        let idx = currentMuxerSegmentIndex
+        if let result = muxer.finalize() {
+            try? FileManager.default.removeItem(at: result.path)
+            EngineLog.emit(
+                "[HLSSegmentProducer] seg-\(idx).m4s partial at teardown (\(result.bytesWritten) B) discarded, not adopted",
+                category: .session
+            )
+        }
+        stateLock.lock()
+        currentMuxer = nil
+        stateLock.unlock()
+        currentMuxerSegmentIndex = .min
+    }
+
     deinit {
+        // Backstop for a pump that never exited normally; without an exit reason, a VOD in-flight
+        // segment is partial by definition, so only live may adopt here.
         if currentMuxer != nil {
-            finalizeSessionMuxerAndAdopt()
+            if isLive {
+                finalizeSessionMuxerAndAdopt()
+            } else {
+                discardSessionMuxer()
+            }
         }
     }
 
@@ -2150,7 +2187,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
 
-        finalizeSessionMuxerAndAdopt()
+        if Self.shouldAdoptTeardownSegment(exitReason: exitReason, isLive: isLive) {
+            finalizeSessionMuxerAndAdopt()
+        } else {
+            discardSessionMuxer()
+        }
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - pumpStart.uptimeNanoseconds) / 1_000_000
         EngineLog.emit(
             "[HLSSegmentProducer] pump finished: reason=\(exitReason) "

@@ -65,7 +65,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let audioSourceStreamIndexOverride: Int32?
 
     var demuxer: Demuxer?
-    private var cache: SegmentCache?
+    var cache: SegmentCache?   // internal for the teardown-partial witness test
     var producer: HLSSegmentProducer?
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?

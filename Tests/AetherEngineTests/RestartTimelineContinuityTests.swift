@@ -161,6 +161,29 @@ struct RestartTimelineContinuityTests {
                 "restart segment bytes diverged beyond the mfhd sequence number (continuous \(continuous.count) B vs restart \(restarted.count) B)")
     }
 
+    /// A restart teardown leaves the in-flight segment PARTIAL: its content is shorter than the
+    /// playlist's EXTINF, and video/audio end at different interleave-drain points. Adopting it
+    /// caches a lie under a full segment's index; byte-budgeted retention then keeps it replayable
+    /// (device: seeking back to 0 played a teardown-partial with ~2 s of A/V split). VOD must only
+    /// adopt the natural EOF tail (a legitimately short final segment); live keeps adopting, since
+    /// its playlist advertises the ACTUAL duration via the finalize report.
+    @Test("Teardown adoption policy: VOD adopts only the natural EOF tail; live always adopts")
+    func teardownAdoptionPolicy() {
+        typealias Reason = HLSSegmentProducer.PumpExitReason
+        let abnormal: [Reason] = [.stopRequested, .readError(code: -5), .muxerFailed,
+                                  .backpressureWedge, .segmentStall, .sourceReplay,
+                                  .keyframeStarvation]
+        #expect(HLSSegmentProducer.shouldAdoptTeardownSegment(exitReason: .eof, isLive: false))
+        for reason in abnormal {
+            #expect(!HLSSegmentProducer.shouldAdoptTeardownSegment(exitReason: reason, isLive: false),
+                    "VOD must discard the partial on \(reason)")
+        }
+        for reason in abnormal + [.eof] {
+            #expect(HLSSegmentProducer.shouldAdoptTeardownSegment(exitReason: reason, isLive: true),
+                    "live must keep adopting on \(reason)")
+        }
+    }
+
     /// Sources whose audio leads the video at head-of-stream: the inherited audio shift maps the
     /// leading audio to negative output timestamps, which the muxer no longer absorbs
     /// (avoid_negative_ts=disabled; tfdt is unsigned). The producer must drop that pre-roll so
