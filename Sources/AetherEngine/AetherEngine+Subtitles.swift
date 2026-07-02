@@ -707,8 +707,15 @@ extension AetherEngine {
     // MARK: - Native multi-track decode (#55, all-tracks)
 
     /// Launch the multi-decode reader that fills every text track's store in one side-demuxer pass (#55, all-tracks). Separate from the inline host-overlay path (subtitleCues). Idempotent: cancels any prior reader first. `stores` is ordinal-aligned with `nativeSubtitleTrackTable`.
-    func startNativeSubtitleReaders(url: URL, stores: [NativeSubtitleCueStore], fromStart: Bool = false) {
+    /// `readToEOF` reads straight through without the read-ahead parking and marks the stores finished at EOF.
+    /// `startAtSeconds` overrides the read anchor (default: the current playhead). Sodalite#32: eager readers
+    /// anchor at the SESSION START POSITION, not 0; a from-0 read behind a resume position spent the whole
+    /// session catching up over a remote link and never covered the playhead (device: readMax 48s vs playhead
+    /// 304s, every .vtt served empty).
+    func startNativeSubtitleReaders(url: URL, stores: [NativeSubtitleCueStore],
+                                    readToEOF: Bool = false, startAtSeconds: Double? = nil) {
         cancelNativeSubtitleReaders()
+        nativeSubtitleReadersRunToEOF = readToEOF
         var pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
             guard ordinal < stores.count, let src = entry.sourceStreamIndex else { continue }
@@ -725,9 +732,7 @@ extension AetherEngine {
         let formatHint = customFormatHint
         let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
         let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
-        // Sodalite#32: a whole-program .vtt must contain EVERY cue (0 -> EOF), so read from the start, not from
-        // the current playhead / resume position (which would drop all cues before it).
-        let startAt = fromStart ? 0.0 : sourceTime
+        let startAt = startAtSeconds ?? sourceTime
         let reader = customClone
         // #76: same bounded-probe + active-title open as the inline reader.
         let probesize = loadedOptions.probesize
@@ -738,7 +743,7 @@ extension AetherEngine {
                 url: url, reader: reader, formatHint: formatHint, headers: headers,
                 pairs: pairs, startAt: startAt, videoWidth: w, videoHeight: h,
                 callerProbesize: probesize, callerMaxAnalyzeDuration: maxAnalyzeDuration,
-                selectTitleID: titleID, readToEOF: fromStart
+                selectTitleID: titleID, readToEOF: readToEOF
             )
         }
     }
@@ -749,6 +754,7 @@ extension AetherEngine {
         nativeSubtitleReadersTask = nil
         nativeSubtitleReadersDemuxer?.markClosed()
         nativeSubtitleReadersDemuxer = nil
+        nativeSubtitleReadersRunToEOF = false
     }
 
     /// Multi-stream side-demuxer pass: one EmbeddedSubtitleDecoder per text stream, writing to NativeSubtitleCueStores (not subtitleCues). Mirrors `runEmbeddedSubtitleReader` (prewarm, re-sample, -2 s lead-in, park). Always plain text: mov_text muxer carries no ASS markup.
@@ -920,11 +926,13 @@ extension AetherEngine {
     /// Select or deselect the native mov_text track by ordinal (#55). nil deselects all. Matches by `extendedLanguageTag` first (language-rank-aware for same-language duplicates), falls back to positional index. No-op when no legible group or ordinal out of range.
     public func setNativeSubtitleSelected(track ordinal: Int?) {
         // #15: lazy readers — run the side-demuxer only while a native track is selected (PiP), idle otherwise.
+        // Sodalite#32: an eager read-to-EOF reader survives deselect (it is building whole-session coverage;
+        // cancelling it on PiP exit left the store frozen at ~48s and every later .vtt served empty).
         if ordinal != nil {
             if nativeSubtitleReadersTask == nil, let params = nativeSubtitleReaderParams {
                 startNativeSubtitleReaders(url: params.url, stores: params.stores)
             }
-        } else {
+        } else if !nativeSubtitleReadersRunToEOF {
             cancelNativeSubtitleReaders()
         }
         guard let item = currentAVPlayer?.currentItem else { return }

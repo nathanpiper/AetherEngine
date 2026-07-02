@@ -360,11 +360,16 @@ extension AetherEngine {
                 // empty when AVKit fetches it. Start them eagerly here so the cue stores fill from load, the way a
                 // static VOD subtitle file is fully present up front.
                 if loadedOptions.eagerNativeSubtitleReaders {
-                    // Sodalite#32: read from the start straight to EOF (no read-ahead parking) so every windowed
-                    // segment is populated when AVKit fetches it. Cue data is tiny; decoupled from the .vtt shape.
+                    // Sodalite#32: anchor at the SESSION START POSITION (resume), not 0, and read straight to
+                    // EOF (no read-ahead parking). A from-0 read behind a resume position spent the whole
+                    // session catching up over a remote link and never covered the playhead (device: readMax
+                    // 48s vs playhead 304s, every .vtt served empty). Coverage is [startPosition..EOF]; a
+                    // backward seek below the resume point has no native cues until the reader design moves
+                    // to a cheap whole-track source.
                     let readEOF = !loadedOptions.isLive
-                    startNativeSubtitleReaders(url: url, stores: stores, fromStart: readEOF)
-                    EngineLog.emit("[PiPDiag] eager readers started: stores=\(stores.count) fromStart=\(readEOF)", category: .engine)
+                    startNativeSubtitleReaders(url: url, stores: stores,
+                                               readToEOF: readEOF, startAtSeconds: startPosition ?? 0)
+                    EngineLog.emit("[PiPDiag] eager readers started: stores=\(stores.count) readToEOF=\(readEOF) startAt=\(String(format: "%.1f", startPosition ?? 0))", category: .engine)
                 }
             }
         }

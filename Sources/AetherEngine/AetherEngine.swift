@@ -625,6 +625,11 @@ public final class AetherEngine: ObservableObject {
     /// so a session that never selects a native track pays no standing side-demuxer cost. Cleared on stop/clear.
     var nativeSubtitleReaderParams: (url: URL, stores: [NativeSubtitleCueStore])?
 
+    /// True while the running native readers were started in read-to-EOF (eager) mode (Sodalite#32).
+    /// Deselect must NOT cancel such a reader (it is building whole-session coverage for the next PiP
+    /// entry), and select must not replace it with a playhead-anchored parking reader.
+    var nativeSubtitleReadersRunToEOF = false
+
     /// Per-session subtitle event log counter. Caps diagnostic output; reset on each load.
     var subtitleCueDiagnosticCount: Int = 0
 

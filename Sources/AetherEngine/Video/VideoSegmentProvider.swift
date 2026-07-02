@@ -590,12 +590,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let start = segments[segmentIndex].startSeconds
         let end = start + segments[segmentIndex].durationSeconds
         stateLock.unlock()
-        // Sodalite#32: on a persisted/auto-selected-at-load subtitle, AVKit bursts EVERY segment before the
-        // multi-track reader has filled the selected store, then caches the empties it never re-fetches (device:
-        // 264 empty subs_N fetches, readMax=0). Wait for the reader to finish (store complete) so the window is
-        // populated. Only the first fetch blocks; isFinished then short-circuits every later fetch.
-        let deadline = Date().addingTimeInterval(25.0)
-        while !store.isFinished, Date() < deadline { usleep(100_000) }
+        // Sodalite#32: bounded, distance-aware readiness wait replacing the 25 s wait-for-isFinished. AVKit
+        // caches an empty-served window forever, so waiting is worth it; but blocking every fetch on a store
+        // that never finishes serialized the loopback connection AVPlayer also uses for video (device:
+        // scrubbing wedged while a rendition was selected). Wait only while the reader is plausibly about to
+        // cover THIS window (read head within the horizon, or still warming up), and only briefly.
+        let horizonSeconds = 30.0
+        let deadline = Date().addingTimeInterval(3.0)
+        while !store.isFinished,
+              store.readMaxCueEnd() < end,
+              end <= store.readMaxCueEnd() + horizonSeconds || store.readMaxCueEnd() <= 0,
+              Date() < deadline {
+            usleep(100_000)
+        }
         let cues = store.cuesInWindow(start: start, end: end)
         EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) readMax=\(String(format: "%.1f", store.readMaxCueEnd()))", category: .hlsServer)
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:
