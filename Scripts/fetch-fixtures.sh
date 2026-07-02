@@ -10,6 +10,12 @@
 #   av1.mp4         - AV1, software dav1d path on devices without HW
 #   vp9.webm        - VP9, software libavcodec path
 #
+# plus two clips for RestartTimelineContinuityTests (the suite skips
+# those tests when the clips are absent, e.g. on CI):
+#
+#   restart-witness-av.mp4        - H.264 B-frames + AAC, 12 s (3 segments)
+#   restart-witness-leadaudio.mp4 - same, video delayed 0.3 s so audio leads
+#
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
 # and reference them from aetherctl runs.
@@ -80,6 +86,26 @@ ffmpeg -hide_banner -loglevel error -y \
     -f lavfi -i "testsrc2=size=1920x1080:rate=24" \
     -t 5 -c:v libvpx-vp9 -crf 30 -b:v 0 -cpu-used 8 \
     "$FIXTURES_DIR/vp9.webm"
+
+# Restart-continuity witness: A/V with real B-frame reorder (bf 3) and a keyframe
+# every 2 s so the 4 s segment plan cuts on keyframes. Drives
+# RestartTimelineContinuityTests (continuous vs restarted segment equality).
+echo "→ restart-witness-av.mp4 (H.264 B-frames + AAC mono, 12s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=duration=12:size=320x180:rate=24" \
+    -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=12" \
+    -c:v libx264 -preset veryfast -bf 3 -g 48 -pix_fmt yuv420p -b:v 200k \
+    -c:a aac -b:a 48k -ac 1 -shortest \
+    "$FIXTURES_DIR/restart-witness-av.mp4"
+
+# Same content with the video track delayed 0.3 s, so the audio leads the
+# video anchor at head-of-stream (the leading-audio guard scenario).
+echo "→ restart-witness-leadaudio.mp4 (audio leads video by 0.3s, 8s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -itsoffset 0.3 -i "$FIXTURES_DIR/restart-witness-av.mp4" \
+    -i "$FIXTURES_DIR/restart-witness-av.mp4" \
+    -map 0:v -map 1:a -c copy -t 8 \
+    "$FIXTURES_DIR/restart-witness-leadaudio.mp4"
 
 echo ""
 echo "Done. Try:"

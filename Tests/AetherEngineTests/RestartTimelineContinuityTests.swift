@@ -88,6 +88,8 @@ private enum FMP4 {
 
 // MARK: - Fixtures
 
+/// Fixtures/ is local-only by design (gitignored; Scripts/fetch-fixtures.sh regenerates the
+/// synthetic clips). The tests skip via `.enabled(if:)` when a clip is absent, e.g. on CI.
 private func fixtureURL(_ name: String) -> URL {
     URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -95,6 +97,10 @@ private func fixtureURL(_ name: String) -> URL {
         .deletingLastPathComponent()
         .appendingPathComponent("Fixtures")
         .appendingPathComponent(name)
+}
+
+private func fixtureExists(_ name: String) -> Bool {
+    FileManager.default.fileExists(atPath: fixtureURL(name).path)
 }
 
 private func inode(of url: URL) -> UInt64? {
@@ -111,7 +117,10 @@ struct RestartTimelineContinuityTests {
     /// The core witness: segment 1 produced continuously vs re-produced by a restart at
     /// segment 1 must carry the identical media timeline (tfdt per track, sample counts),
     /// and the bytes must match modulo the per-muxer mfhd sequence number.
-    @Test("A restart reproduces a segment with the continuous run's timeline", .timeLimit(.minutes(2)))
+    @Test("A restart reproduces a segment with the continuous run's timeline",
+          .enabled(if: fixtureExists("restart-witness-av.mp4"),
+                   "run Scripts/fetch-fixtures.sh to generate the witness clip"),
+          .timeLimit(.minutes(2)))
     func restartReproducesContinuousTimeline() throws {
         let engine = HLSVideoEngine(url: fixtureURL("restart-witness-av.mp4"), dvModeAvailable: false)
         _ = try engine.start()
@@ -156,7 +165,10 @@ struct RestartTimelineContinuityTests {
     /// leading audio to negative output timestamps, which the muxer no longer absorbs
     /// (avoid_negative_ts=disabled; tfdt is unsigned). The producer must drop that pre-roll so
     /// segment 0 still opens with sane, non-huge timestamps.
-    @Test("Leading head-of-stream audio never produces a negative/wrapped tfdt", .timeLimit(.minutes(2)))
+    @Test("Leading head-of-stream audio never produces a negative/wrapped tfdt",
+          .enabled(if: fixtureExists("restart-witness-leadaudio.mp4"),
+                   "run Scripts/fetch-fixtures.sh to generate the witness clip"),
+          .timeLimit(.minutes(2)))
     func leadingAudioIsGuardedAtHeadOfStream() throws {
         let engine = HLSVideoEngine(url: fixtureURL("restart-witness-leadaudio.mp4"), dvModeAvailable: false)
         _ = try engine.start()
