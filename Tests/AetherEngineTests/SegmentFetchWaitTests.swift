@@ -311,3 +311,32 @@ extension SegmentFetchWaitTests {
         #expect(recorder.all == [40])
     }
 }
+
+/// #93 residual: a fetch superseded by a newer declared target (skip-storm orphan) must never
+/// fire a restart; AVPlayer's newest request is what it actually wants.
+extension SegmentFetchWaitTests {
+    @Test("a superseded (stale) request never fires a restart")
+    func staleRequestNeverFires() {
+        let cache = SegmentCache(forwardWindow: 30, backwardWindow: 30)
+        defer { cache.close() }
+        let recorder = Recorder()
+        // The activity poll runs once per fire-loop iteration; declaring the newer target there
+        // simulates AVPlayer's playhead request arriving while this stale one waits.
+        let provider = VideoSegmentProvider(
+            cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
+            sourceBitrate: 8_000_000,
+            restartHandler: { idx in recorder.record(idx) },
+            restartActivity: { [weak cache] in
+                cache?.declareTarget(45)
+                return false
+            },
+            repositionWaitSlice: 0.05,
+            repositionRideCapSeconds: 5.0
+        )
+        storeAbove(cache, range: 50...55)
+        let served = provider.mediaSegment(at: 40)
+        #expect(served == nil)
+        #expect(recorder.all.isEmpty)
+    }
+}

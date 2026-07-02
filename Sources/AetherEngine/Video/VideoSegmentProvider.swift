@@ -439,9 +439,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                         guard let base = activeProducerBase?() else { return false }
                         return base <= index && index - base <= Self.forwardWaitWindow
                     }()
+                    // A request superseded by a NEWER declared target is an orphan of a skip
+                    // storm: AVPlayer's newest request is what it actually wants (the same
+                    // newest-wins semantics the coalescer applies to immediate restarts).
+                    // Firing the orphan's index tears down the producer serving the REAL
+                    // playhead (device: a stale seg262 fire evicted the settled base-252
+                    // producer, restarts ping-ponged between stale and playhead indices,
+                    // every capture was discarded and the playhead segment took 19.8 s).
+                    // Orphans wait out their slices and 503; AVPlayer has abandoned them.
+                    let isLatestTarget = cache.targetIndex == index
                     let orphanBackstop = attempt == Self.repositionMaxWaits - 1
-                        && !firedThisCall && !producerCovers
-                    if (lastRestartIndex != index && !producerCovers) || orphanBackstop {
+                        && !firedThisCall && !producerCovers && isLatestTarget
+                    if isLatestTarget
+                        && ((lastRestartIndex != index && !producerCovers) || orphanBackstop) {
                         EngineLog.emit(
                             "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
                             category: .session
