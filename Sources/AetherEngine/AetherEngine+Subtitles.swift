@@ -73,6 +73,7 @@ extension AetherEngine {
 
     /// Activate an embedded subtitle stream via a side Demuxer. Side demuxer is used because the main HLS pump races ~60-80 s ahead mid-playback and discards the subtitle packets; seeking the side demuxer to the playhead is cheaper than re-reading the main pump. Re-seeks on `engine.seek`. Supports text codecs (SubRip / ASS / SSA / WebVTT / mov_text) and bitmap codecs (PGS / DVB / DVD / XSUB).
     public func selectSubtitleTrack(index: Int) {
+        hostExplicitSubtitleAction = true
         selectSubtitleTrack(index: index, startAt: sourceTime)
     }
 
@@ -80,6 +81,12 @@ extension AetherEngine {
     /// `sourceTime`; the preferred-subtitle-language auto-select at load passes the resume position so the side
     /// demuxer seeks to the playhead instead of burst-reading from byte 0 on a resumed mid-file load (#73).
     func selectSubtitleTrack(index: Int, startAt: Double) {
+        // #88: external ids route onto the sidecar decode path; no side demuxer, no loadedURL needed.
+        if let external = externalSubtitleRegistry[index] {
+            selectExternalSubtitleTrack(id: index, track: external)
+            return
+        }
+        guard index < Self.externalSubtitleTrackIDBase else { return }  // unknown external id: no-op
         guard let url = loadedURL else { return }
 
         // #77: in-band CEA-608/708 is fed by the always-on producer CC tap (set up at load), not a side
@@ -148,7 +155,8 @@ extension AetherEngine {
     /// A no-op when the list is empty, no track matches, or the host already activated a subtitle. The resolved
     /// index is published via `activeSubtitleTrackIndex`. Independent of `prepareNativeSubtitles`. (#73)
     func applyPreferredSubtitleSelection(startAnchor: Double?, sourceDuration: Double?) {
-        guard !loadedOptions.preferredSubtitleLanguages.isEmpty, !isSubtitleActive else { return }
+        guard !loadedOptions.preferredSubtitleLanguages.isEmpty, !isSubtitleActive,
+              !hostExplicitSubtitleAction else { return }
         guard let index = Self.selectSubtitleIndex(
             tracks: subtitleTracks,
             preferredLanguages: loadedOptions.preferredSubtitleLanguages
@@ -166,8 +174,19 @@ extension AetherEngine {
         selectSubtitleTrack(index: Int(index), startAt: anchor > 0 ? anchor : sourceTime)
     }
 
-    /// Activate an embedded subtitle stream as the secondary companion track (issue #47). Text-only; bitmap codecs are rejected. Runs a second side demuxer concurrently.
+    /// Activate an embedded subtitle stream as the secondary companion track (issue #47). Text-only; bitmap codecs are rejected. Runs a second side demuxer concurrently. External ids (#88) route onto the secondary sidecar decode.
     public func selectSecondarySubtitleTrack(index: Int) {
+        hostExplicitSubtitleAction = true
+        if let external = externalSubtitleRegistry[index] {
+            cancelSidecarTask(channel: .secondary)
+            cancelEmbeddedSubtitleReader(channel: .secondary)
+            activeSecondaryEmbeddedSubtitleStreamIndex = -1
+            activeSecondaryExternalSubtitleTrackID = index
+            startSecondarySidecarDecode(url: external.url, httpHeaders: external.httpHeaders)
+            return
+        }
+        guard index < Self.externalSubtitleTrackIDBase else { return }
+        activeSecondaryExternalSubtitleTrackID = nil
         guard let url = loadedURL else { return }
         var customClone: IOReader? = nil
         if isCustomSource {
@@ -647,6 +666,12 @@ extension AetherEngine {
         return info
     }
 
+    /// #88: activate a registered external track via the sidecar decode path. Task 4 adds the
+    /// finished-store instant backfill for load-declared tracks.
+    private func selectExternalSubtitleTrack(id: Int, track: ExternalSubtitleTrack) {
+        startSidecarDecode(url: track.url, httpHeaders: track.httpHeaders, externalTrackID: id)
+    }
+
     /// Unregister an external track: delist + drop the registry entry; an active selection
     /// (primary or secondary) is cleared. Embedded ids no-op.
     public func removeExternalSubtitleTrack(id: Int) {
@@ -656,13 +681,23 @@ extension AetherEngine {
         if activeSecondaryExternalSubtitleTrackID == id { clearSecondarySubtitle() }
     }
 
-    /// Fetch and decode a sidecar subtitle file (.srt / .ass / .vtt / .ssa) via `SubtitleDecoder.decodeFile`, replacing `subtitleCues` atomically. `httpHeaders` nil forwards `LoadOptions.httpHeaders` (same auth as the media, #32).
+    /// Fetch and decode a sidecar subtitle file (.srt / .ass / .vtt / .ssa) via `SubtitleDecoder.decodeFile`, replacing `subtitleCues` atomically. `httpHeaders` nil forwards `LoadOptions.httpHeaders` (same auth as the media, #32). Prefer registering via `addExternalSubtitleTrack` + `selectSubtitleTrack` (#88), which keeps the track listed and `activeSubtitleTrackIndex` populated; this API stays for compatibility and one-shot use.
     public func selectSidecarSubtitle(url: URL, httpHeaders: [String: String]? = nil) {
+        hostExplicitSubtitleAction = true
+        startSidecarDecode(url: url, httpHeaders: httpHeaders, externalTrackID: nil)
+    }
+
+    /// Shared sidecar-decode start: the pre-#88 selectSidecarSubtitle body, parameterized on which
+    /// track id (if any) to publish as active. Also clears the pump-tap overlay stream so a prior
+    /// tap-fed selection stops forwarding into the sidecar's cues (latent pre-#88 bug: the tap
+    /// forward-guard matched the stale index and kept appending).
+    func startSidecarDecode(url: URL, httpHeaders: [String: String]?, externalTrackID: Int?) {
         cancelSidecarTask()
         // Sidecar replaces any active embedded stream.
         cancelEmbeddedSubtitleReader()
         activeEmbeddedSubtitleStreamIndex = -1
-        activeSubtitleTrackIndex = nil
+        activeSubtitleTrackIndex = externalTrackID
+        subtitleTapOverlayStreamIndex = nil
 
         loadedSidecarURL = url
         isSubtitleActive = true
@@ -705,10 +740,16 @@ extension AetherEngine {
 
     /// Decode a sidecar as the secondary companion track (issue #47), independent of the primary.
     public func selectSecondarySidecarSubtitle(url: URL, httpHeaders: [String: String]? = nil) {
+        hostExplicitSubtitleAction = true
         cancelSidecarTask(channel: .secondary)
         cancelEmbeddedSubtitleReader(channel: .secondary)
         activeSecondaryEmbeddedSubtitleStreamIndex = -1
+        activeSecondaryExternalSubtitleTrackID = nil
+        startSecondarySidecarDecode(url: url, httpHeaders: httpHeaders)
+    }
 
+    /// Shared secondary sidecar-decode start (#88): the pre-#88 selectSecondarySidecarSubtitle body.
+    func startSecondarySidecarDecode(url: URL, httpHeaders: [String: String]?) {
         loadedSecondarySidecarURL = url
         isSecondarySubtitleActive = true
         secondarySubtitleCues = []
@@ -739,6 +780,7 @@ extension AetherEngine {
 
     /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader, clear native mov_text stores (#55, all-tracks). `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
     public func clearSubtitle() {
+        hostExplicitSubtitleAction = true
         cancelSidecarTask()
         cancelEmbeddedSubtitleReader()
         activeEmbeddedSubtitleStreamIndex = -1
@@ -777,9 +819,11 @@ extension AetherEngine {
     /// Turn the secondary subtitle off and clear its cues. Tears down
     /// the secondary sidecar decode task and the secondary side reader.
     public func clearSecondarySubtitle() {
+        hostExplicitSubtitleAction = true
         cancelSidecarTask(channel: .secondary)
         cancelEmbeddedSubtitleReader(channel: .secondary)
         activeSecondaryEmbeddedSubtitleStreamIndex = -1
+        activeSecondaryExternalSubtitleTrackID = nil
         loadedSecondarySidecarURL = nil
         isSecondarySubtitleActive = false
         secondarySubtitleCues = []

@@ -551,6 +551,11 @@ public final class AetherEngine: ObservableObject {
     /// Read by AetherEngine+FrameExtractor.
     private(set) var loadedOptions: LoadOptions = .init()
 
+    #if DEBUG
+    /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
+    func setLoadedOptionsForTesting(_ options: LoadOptions) { loadedOptions = options }
+    #endif
+
     /// In-flight sidecar decode task. Cancelled on clear/track-switch to prevent stale cue overwrites.
     var sidecarTask: Task<Void, Never>?
 
