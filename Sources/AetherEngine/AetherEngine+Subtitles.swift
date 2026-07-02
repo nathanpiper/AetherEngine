@@ -1005,6 +1005,19 @@ extension AetherEngine {
             item.select(option, in: group)
             let after = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
             EngineLog.emit("[PiPDiag] select done: selected=\(after) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
+            // Sodalite#32: a select landing inside a stall recovery gets dropped outright by AVFoundation
+            // (device: PiP entry 0.1s after waitingToPlay -> playing read back nil and STAYED nil; the same
+            // select succeeded on the previous entry). Re-assert briefly until it sticks or the item changes.
+            var retries = 0
+            while item.currentMediaSelection.selectedMediaOption(in: group) == nil,
+                  retries < 4,
+                  currentAVPlayer?.currentItem === item {
+                retries += 1
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                item.select(option, in: group)
+                let retried = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
+                EngineLog.emit("[PiPDiag] select retry #\(retries): selected=\(retried)", category: .engine)
+            }
             // Persistence probe: does AVSmartSubtitlesController drop it, or does it stay (renderer-attach issue)?
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             let later = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
