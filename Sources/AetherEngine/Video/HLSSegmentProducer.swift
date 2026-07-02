@@ -140,6 +140,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let cache: SegmentCache
     /// Segment index offset; 0 for initial-start, non-zero for restart sessions.
     private let baseIndex: Int
+    /// The segment index this producer is anchored at (#93 residual: the provider skips firing
+    /// restarts at indices the active producer demonstrably covers).
+    var anchoredBaseIndex: Int { baseIndex }
 
     /// Source video TB, carried to rescale timestamps (avformat_write_header rewrites the muxer's TB).
     private let sourceVideoTimeBase: AVRational
@@ -826,8 +829,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Allocate (or re-allocate at SSAI program switch) the session's mp4 muxer.
     private func allocateMuxer(initialSegmentIndex: Int,
                                adVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])? = nil) -> MP4SegmentMuxer? {
-        let backpressureTarget = initialSegmentIndex - Self.bufferAheadSegments
-        if !awaitBackpressureRelease(target: backpressureTarget, head: initialSegmentIndex, context: "alloc") { return nil }
+        // #93 residual: the FIRST alloc of a producer (its base segment) must not gate on the
+        // consumer's fetch high water. An anchored initial producer (resume start) runs before ANY
+        // segment fetch exists, because AVPlayer is still waiting on init.mp4, which is captured by
+        // exactly this alloc; the park starved the map request into a fatal -12889. Producing the
+        // base segment is never overproduction: the consumer requested it (fetch-triggered restart)
+        // or is about to (anchored start). seg0 sessions are unaffected (their target is negative
+        // and releases immediately).
+        if initialSegmentIndex != baseIndex {
+            let backpressureTarget = initialSegmentIndex - Self.bufferAheadSegments
+            if !awaitBackpressureRelease(target: backpressureTarget, head: initialSegmentIndex, context: "alloc") { return nil }
+        }
         if checkShouldStop() { return nil }
 
         let isReinit = adVideoConfig != nil

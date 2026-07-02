@@ -933,8 +933,45 @@ extension AetherEngine {
         }
     }
 
+    /// #93 residual: start the lazy readers only when no producer restart is executing. PiP entry
+    /// mid-restart opened a second WAN demuxer that competed with the restart for the starved
+    /// link (device: readers started during a 44 s restart, exited with 0 cues). While a restart
+    /// is in flight, poll until it settles (bounded), then start; the pump tap keeps covering the
+    /// produced region meanwhile, so only the AVKit-prefetch-burst coverage is deferred.
+    func startLazyNativeSubtitleReadersWhenIdle() {
+        guard nativeSubtitleReadersTask == nil, let params = nativeSubtitleReaderParams else { return }
+        var restartBusy = nativeVideoSession?.restartInFlight == true
+        #if DEBUG
+        if let override = testHookRestartInFlightOverride { restartBusy = override }
+        #endif
+        guard restartBusy else {
+            startNativeSubtitleReaders(url: params.url, stores: params.stores)
+            return
+        }
+        nativeSubtitleReaderDeferralTask?.cancel()
+        nativeSubtitleReaderDeferralTask = Task { @MainActor [weak self] in
+            let deadline = DispatchTime.now() + 30.0
+            while !Task.isCancelled, DispatchTime.now() < deadline {
+                guard let self else { return }
+                var busy = self.nativeVideoSession?.restartInFlight == true
+                #if DEBUG
+                if let override = self.testHookRestartInFlightOverride { busy = override }
+                #endif
+                if !busy { break }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard !Task.isCancelled, let self else { return }
+            guard self.nativeSubtitleReadersTask == nil,
+                  let params = self.nativeSubtitleReaderParams else { return }
+            EngineLog.emit("[AetherEngine] deferred native subtitle readers starting (restart settled)", category: .engine)
+            self.startNativeSubtitleReaders(url: params.url, stores: params.stores)
+        }
+    }
+
     /// Cancel the multi-decode reader + markClosed its side demuxer (mirrors `cancelEmbeddedSubtitleReader`).
     func cancelNativeSubtitleReaders() {
+        nativeSubtitleReaderDeferralTask?.cancel()
+        nativeSubtitleReaderDeferralTask = nil
         nativeSubtitleReadersTask?.cancel()
         nativeSubtitleReadersTask = nil
         nativeSubtitleReadersDemuxer?.markClosed()
@@ -1114,9 +1151,7 @@ extension AetherEngine {
         // Sodalite#32: an eager read-to-EOF reader survives deselect (it is building whole-session coverage;
         // cancelling it on PiP exit left the store frozen at ~48s and every later .vtt served empty).
         if ordinal != nil {
-            if nativeSubtitleReadersTask == nil, let params = nativeSubtitleReaderParams {
-                startNativeSubtitleReaders(url: params.url, stores: params.stores)
-            }
+            startLazyNativeSubtitleReadersWhenIdle()
         } else if !nativeSubtitleReadersRunToEOF {
             cancelNativeSubtitleReaders()
         }

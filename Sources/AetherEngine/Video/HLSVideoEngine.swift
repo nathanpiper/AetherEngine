@@ -108,6 +108,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// lands at currentTime S (from-start = 0 = no shift). Set before `start()`. Sodalite#32.
     var subtitleStreamStartSeconds: Double = 0
 
+    /// Source position (seconds, playlist axis) the session will start at (resume/seek). Set
+    /// before `start()`; anchors the FIRST producer at the matching segment instead of seg0
+    /// (#93 residual: the seg0 cold start was torn down unwatched on every resume, and the
+    /// fetch/restart race could 404 the item into a host reload). nil/0 keeps baseIndex 0.
+    var initialStartSeconds: Double?
+    /// Resolved in start() from `initialStartSeconds` once the segment plan exists.
+    private(set) var initialProducerBaseIndex: Int = 0
+
     /// One cue store per declared text track (#55, all-tracks), ordinal-aligned with
     /// `nativeSubtitleLanguagesForSession`. Re-threaded onto every producer restart so
     /// per-segment cue drain survives seek/audio-switch. Empty = no native subtitles active.
@@ -376,6 +384,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var consecutiveWedgeReanchors = 0
     var lastWedgeReanchorPosition = -Double.greatestFiniteMagnitude
     static let maxConsecutiveWedgeReanchors = 5
+
+    /// #93 residual: a stalled AVPlayer sometimes never resumes REQUESTING after a wedge re-anchor
+    /// (device: plain playback, one -15628 errorLog, then zero segment GETs while parked in
+    /// waitingToMinimizeStalls forever, item never fails). The served playlist alone cannot reach
+    /// it, so after this grace window with no fetch and intact play intent the engine asks the
+    /// host to re-engage the consumer (zero-tolerance nudge seek, the same effect a manual
+    /// back-out had). Fired at most once per re-anchor attempt; the re-anchor cap bounds the storm.
+    var onConsumerReengageNeeded: (@Sendable (Double) -> Void)?
+    static let consumerReengageGraceSeconds: TimeInterval = 6.0
+
+    /// Locked snapshot/compare of the session epoch so detached watchdogs can verify the session
+    /// they were armed for is still the live one (stop() bumps the epoch).
+    func sessionEpochSnapshot() -> UInt64 {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return sessionEpoch
+    }
+    func isSessionEpochCurrent(_ epoch: UInt64) -> Bool {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return sessionEpoch == epoch
+    }
 
     /// Bumped by `stop()` under `restartLock`. Restarts re-validate before installing the new
     /// producer; a mid-restart stop() wins and the restart unwinds.
@@ -766,6 +796,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.savedVideoConfig = videoConfig
         self.segmentPlan = plan
 
+        // #93 residual: anchor the FIRST producer at the session's start position instead of seg0.
+        // A resume start otherwise produces seg0 (torn down and discarded seconds later when
+        // AVPlayer's initial seek fetches the resume segment), restarts, and the fetch/restart race
+        // can 404 the item into a host reload (device: double spinner). The baseIndex > 0 anchor is
+        // the battle-tested restart path (gate at plan[base].startPts, tfdt continuity per 4.9.1).
+        if !isLiveSession, let startSeconds = initialStartSeconds, startSeconds > 0 {
+            initialProducerBaseIndex = segmentIndexForPlaylistTime(startSeconds)
+            EngineLog.emit(
+                "[HLSVideoEngine] initial producer anchored at idx=\(initialProducerBaseIndex) "
+                + "(startPosition=\(String(format: "%.2f", startSeconds))s)",
+                category: .session
+            )
+        }
+
         // Fallback duration from avg_frame_rate for MKVs that drop TrackEntry DefaultDuration
         // (HandBrake/web-rip pipelines). Without it, trun.last.duration=0 and AVPlayer parks on
         // WaitingToMinimizeStallsReason. 25 fps / 1 ms TB = 40 ticks; 23.976 fps = 41 ticks.
@@ -1052,6 +1096,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.requestRestart(at: idx)
             },
+            restartActivity: isLiveSession ? nil : { [weak self] in
+                self?.restartInFlight ?? false
+            },
+            activeProducerBase: isLiveSession ? nil : { [weak self] in
+                self?.currentProducerBaseIndex
+            },
+            // #93 residual: the first producer may be anchored at the resume segment; without this
+            // the cold-start heuristic (abs(index - lastRestartIndex) > 2) restarts it immediately.
+            initialRestartIndex: initialProducerBaseIndex,
             nativeSubtitleStores: nativeSubtitleCueStoresForSession,
             nativeSubtitleLanguages: nativeSubtitleLanguagesForSession,
             nativeSubtitleRenditionInfos: nativeSubtitleRenditionInfosForSession,
@@ -1083,7 +1136,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         try srv.start()
         self.server = srv
 
-        // 8. Kick the pump.
+        // 8. Kick the pump. An anchored first producer (#93 residual) needs the demuxer positioned
+        // at the anchor BEFORE the pump reads, exactly like performRestart's pre-makeProducer seek:
+        // the gate only DROPS pre-target packets, so an unseeked pump would read (and discard) the
+        // whole file up to the resume point. Absolute source-PTS for the same reason as the
+        // restart path (relative playlist time lands a keyframe behind on non-zero startPts0).
+        if initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count {
+            let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+            let anchorSeconds = Double(plan[initialProducerBaseIndex].startPts) * Double(tb.num) / Double(tb.den)
+            dem.seek(to: anchorSeconds)
+        }
         prod.start()
 
         // URL routing: master playlist (VIDEO-RANGE=PQ + SUPPLEMENTAL-CODECS=dvh1) only when
@@ -1494,6 +1556,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Entry point from `VideoSegmentProvider` when AVPlayer requests a segment outside the LRU window.
     /// Coalesces burst seeks so only the in-flight restart + one final settled-target restart run (#35).
     /// init.mp4 is byte-deterministic for a fixed `StreamConfig` so AVPlayer's cached copy stays valid.
+    /// True while a coalesced restart run is executing (#93 residual: the provider's waiting
+    /// segment fetches ride this instead of burning fixed retry budgets, and skip re-firing
+    /// restarts at stale indices against the coalescer's newer target).
+    var restartInFlight: Bool {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return restartCoalescer.isInFlight
+    }
+
+    /// Base index of the currently-installed producer, nil when none (#93 residual: a fetch for
+    /// an index the active producer covers must WAIT for its march, not tear it down; device saw
+    /// a 75%-complete capture killed by a backstop re-fire and a fresh forward march restarted).
+    var currentProducerBaseIndex: Int? {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return producer?.anchoredBaseIndex
+    }
+
+    /// Total media-segment requests seen this session (#93 residual): the stall-triggered
+    /// re-engage watchdog compares snapshots to detect a consumer that stopped requesting.
+    var mediaFetchCountSnapshot: UInt64 {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return provider?.mediaFetchCount ?? 0
+    }
+
     func requestRestart(at idx: Int, authoritative: Bool = false) {
         restartLock.lock()
         let shouldRun = restartCoalescer.begin(idx, authoritative: authoritative)
@@ -1588,7 +1676,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 if !isLiveSession, sideAudioDemuxer == nil {
                     let fresh = Demuxer()
                     do {
-                        try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: false)
+                        // .restartReopen: header/PMT parse only; the full find_stream_info budget was
+                        // the bulk of a 44 s wedge-reopen over WAN (#93 residual).
+                        try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: .restartReopen, isLive: false)
                         dem.markClosed() // abort the wedged read now that the replacement is ready
                         freshDemuxer = fresh
                         activeDem = fresh

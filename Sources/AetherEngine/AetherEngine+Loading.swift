@@ -217,6 +217,15 @@ extension AetherEngine {
         // #65 pause false-positive: let the producer read AVPlayer's play intent off-main so its backpressure
         // wedge detector suspends while the consumer is paused. Set before start() so makeProducer captures it.
         session.playIntentProvider = { [playIntentMirror] in playIntentMirror.get() }
+        // #93 residual: after a wedge re-anchor with a consumer that stopped requesting entirely,
+        // nudge AVPlayer: a zero-tolerance seek to its own position rebuilds AVFoundation's loading
+        // pipeline (the effect a manual back-out had). Opens the spurious-pause window too, since
+        // the nudge can bounce the transport state.
+        session.onConsumerReengageNeeded = { [weak self] position in
+            Task { @MainActor [weak self] in
+                self?.reengageStalledConsumer(position: position, trigger: "wedge re-anchor")
+            }
+        }
         session.onPlaylistShiftRebased = { [weak self] seconds, seamOutputSeconds in
             Task { @MainActor in
                 guard let self = self else { return }
@@ -335,6 +344,10 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] native subtitle default ordinal=\(defaultOrdinal) wholeProgram=\(session.nativeSubtitleWholeProgram) prefLangs=\(loadedOptions.nativeSubtitlePreferredLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
         }
 
+        // #93 residual: hand the resume position to the session so the FIRST producer anchors at
+        // the matching segment instead of producing seg0 into an immediate teardown.
+        session.initialStartSeconds = startPosition
+
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
         var playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
             try session.start()
@@ -448,8 +461,26 @@ extension AetherEngine {
             storeIn: &nativeCancellables
         )
         host.$timeControlStatus
-            .sink { [weak self] status in
+            .sink { [weak self, weak host] status in
                 guard let self = self else { return }
+                // #93 residual: during active stall recovery AVPlayer can drop a SPURIOUS .paused
+                // (rate 0, no wait reason, no user action). Latching it kills both recovery paths,
+                // so re-assert play() within the bounded window instead (see stallRecoveryWindowUntil).
+                if Self.shouldReassertPlayDuringRecovery(
+                    statusIsPaused: status == .paused,
+                    engineStateIsPlaying: self.state == .playing,
+                    now: Date(), windowUntil: self.stallRecoveryWindowUntil,
+                    reasserts: self.stallRecoveryReasserts
+                ) {
+                    self.stallRecoveryReasserts += 1
+                    EngineLog.emit(
+                        "[AetherEngine] #65 spurious pause during stall recovery; re-asserting play "
+                        + "(\(self.stallRecoveryReasserts)/\(Self.maxStallRecoveryReasserts))",
+                        category: .engine
+                    )
+                    host?.play()
+                    return
+                }
                 // #65 pause false-positive: mirror AVPlayer's play intent for the off-main producer wedge detector.
                 // != .paused covers both .playing and .waitingToPlay, so a deep rebuffer (wants to play, starved)
                 // still reads as play-intent and can legitimately trip the breaker; only a real pause suspends it.
@@ -466,6 +497,50 @@ extension AetherEngine {
                     if self.state != .playing { self.state = .playing }
                 @unknown default:
                     break
+                }
+            }
+            .store(in: &nativeCancellables)
+
+        // #93 residual: every stall opens the spurious-pause recovery window (a fresh stall resets
+        // the re-assert budget; the pause can trail the stall by tens of seconds while fetches stay
+        // silent) AND arms the fast re-engage watchdog: the producer-wedge chain needs ~60 s before
+        // its nudge, but a dead consumer pipeline (-15628 signature: stall, then ZERO media fetches
+        // while waitingToPlay) is detectable within seconds of the notification.
+        host.$stallCount
+            .dropFirst()
+            .sink { [weak self, weak host] count in
+                guard let self = self else { return }
+                self.stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
+                self.stallRecoveryReasserts = 0
+                let fetchesAtStall = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                self.stallReengageTask?.cancel()
+                self.stallReengageTask = Task { @MainActor [weak self, weak host] in
+                    // Stage 1: nudge seek. Device-proven to reach AVPlayer (rate re-asserts)
+                    // but NOT always to revive its loader; stage 2 covers that.
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, let self, let host,
+                          host.stallCount == count else { return }
+                    let fetchesNow = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                    guard fetchesNow == fetchesAtStall,
+                          let player = self.currentAVPlayer,
+                          player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                          player.currentItem?.status != .failed else { return }
+                    self.reengageStalledConsumer(
+                        position: player.currentTime().seconds,
+                        trigger: "stall + \(Int(Self.stallReengageGraceSeconds))s without fetches")
+                    // Stage 2: the -15628 loader poison ignores seeks; only a fresh item resets
+                    // it. Escalate when the consumer stays silent through a second grace window.
+                    let fetchesAfterNudge = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, host.stallCount == count else { return }
+                    let fetchesFinal = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                    guard fetchesFinal == fetchesAfterNudge,
+                          let player2 = self.currentAVPlayer,
+                          player2.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                          player2.currentItem?.status != .failed else { return }
+                    self.reloadStalledConsumerItem(position: player2.currentTime().seconds)
                 }
             }
             .store(in: &nativeCancellables)

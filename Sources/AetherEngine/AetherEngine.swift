@@ -624,6 +624,84 @@ public final class AetherEngine: ObservableObject {
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
     var externalNativeStoreFillTask: Task<Void, Never>? = nil
 
+    /// Deferred lazy-reader start while a producer restart is in flight (#93 residual): the
+    /// readers' side demuxer competed with the restart for the starved link. Cancelled by
+    /// cancelNativeSubtitleReaders (deselect / clear / stop / load).
+    var nativeSubtitleReaderDeferralTask: Task<Void, Never>? = nil
+
+    /// #93 residual spurious-pause window: after a playbackStalled notification (or a consumer
+    /// re-engage nudge), AVPlayer can drop to `.paused` with rate 0 and no wait reason WITHOUT any
+    /// user action (device: stall, -15628 errorLog, fetches stop, then the pause). Latching that as
+    /// a user pause kills both recovery paths (producer wedge breaker suspends, re-engage nudge
+    /// aborts on play intent). Within this bounded window a `.paused` transition is re-asserted
+    /// with play() instead of latched; a user pause outside recovery keeps the normal latch, and
+    /// the re-assert cap lets a determined in-window user pause win after two presses.
+    var stallRecoveryWindowUntil: Date = .distantPast
+    var stallRecoveryReasserts = 0
+    nonisolated static let stallRecoveryWindowSeconds: TimeInterval = 30
+    nonisolated static let maxStallRecoveryReasserts = 3
+
+    /// Stall-triggered re-engage watchdog (#93 residual): the producer-wedge chain needs ~60 s
+    /// (park build-up + 24 s break threshold + grace) before its nudge fires; a dead consumer
+    /// pipeline (-15628 signature: stall, then ZERO media fetches) is detectable within seconds
+    /// of the playbackStalled notification. Cancelled on load reset; superseded by newer stalls.
+    var stallReengageTask: Task<Void, Never>? = nil
+    nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
+
+    /// Nudge a consumer that stopped requesting: a zero-tolerance seek to its own position
+    /// rebuilds AVFoundation's loading pipeline (the effect a manual back-out had), play()
+    /// re-asserts intent. Opens the spurious-pause window, since the nudge can bounce transport.
+    func reengageStalledConsumer(position: Double, trigger: String) {
+        guard let host = nativeHost, let player = currentAVPlayer,
+              let item = player.currentItem else { return }
+        guard player.timeControlStatus != .paused else { return }
+        stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
+        EngineLog.emit(
+            "[AetherEngine] #65 re-engaging stalled AVPlayer (\(trigger)): nudge seek to "
+            + "\(String(format: "%.2f", position))s",
+            category: .engine
+        )
+        item.cancelPendingSeeks()
+        player.seek(to: CMTime(seconds: position, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+        host.play()
+    }
+
+    /// Last-resort consumer revival (#93 residual): device-proven that after a -15628 errorLog
+    /// the nudge seek reaches AVPlayer (rate re-asserts) yet its media loader stays dead, zero
+    /// GETs follow. Only a fresh AVPlayerItem resets the loader, the same effect as the user's
+    /// manual back-out. Same URL + same host (the #15 reuse path keeps AVKit/Control Center and
+    /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
+    /// Native subtitle rendition selection is per-item and is lost; acceptable against an
+    /// otherwise endless spinner.
+    func reloadStalledConsumerItem(position: Double) {
+        guard let host = nativeHost, let player = currentAVPlayer,
+              let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
+        guard player.timeControlStatus != .paused else { return }
+        stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
+        EngineLog.emit(
+            "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
+            + "\(String(format: "%.2f", position))s (same URL, same host)",
+            category: .engine
+        )
+        host.load(url: url, startPosition: position)
+        host.play()
+    }
+
+    /// Pure decision for the tcs sink (#93 residual): re-assert play() instead of latching a pause?
+    nonisolated static func shouldReassertPlayDuringRecovery(
+        statusIsPaused: Bool, engineStateIsPlaying: Bool,
+        now: Date, windowUntil: Date, reasserts: Int
+    ) -> Bool {
+        statusIsPaused && engineStateIsPlaying && now < windowUntil
+            && reasserts < maxStallRecoveryReasserts
+    }
+
+    #if DEBUG
+    /// Test-only override for the session's restart-in-flight signal (#93 residual deferral tests).
+    var testHookRestartInFlightOverride: Bool? = nil
+    #endif
+
     #if DEBUG
     /// Test-only store override for the external instant-backfill path (#88); production reads the
     /// live session's stores.
@@ -903,6 +981,10 @@ public final class AetherEngine: ObservableObject {
         activeSecondaryExternalSubtitleTrackID = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
+        stallRecoveryWindowUntil = .distantPast
+        stallRecoveryReasserts = 0
+        stallReengageTask?.cancel()
+        stallReengageTask = nil
         nativeSubtitleTrackTable = []
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil

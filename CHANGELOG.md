@@ -14,9 +14,14 @@ the public-API contract.
 
 - **External subtitles as first-class tracks (#88).** External subtitle files register with the engine (`LoadOptions.externalSubtitles` at load, `addExternalSubtitleTrack` any time) and appear in `subtitleTracks` with a synthetic id and `isExternal == true`, selectable through the unified `selectSubtitleTrack` (primary and secondary). Load-declared tracks join the native WebVTT renditions (subtitles in PiP / AirPlay) via a whole-file store fill, and a finished store backfills the fullscreen overlay instantly on select. `preferredSubtitleLanguages` ranks external tracks too; a track added mid-session auto-activates only while the host has made no explicit subtitle choice. `removeExternalSubtitleTrack` unregisters.
 
+- **Resume-anchored first producer (#93).** The first producer anchors at the segment covering the load's start position instead of producing seg0 into an immediate teardown; the seg0/resume fetch race could previously 404 the item into a host reload (double spinner, audio over a black frame).
+
 ### Fixed
 
 - A pump-tap-fed subtitle selection kept forwarding cues into the overlay after switching to a sidecar file (stale tap-overlay stream index).
+- **iOS HDR/DV master routing.** The master-vs-media gate required a tvOS-style panel-in-HDR signal, so every HDR/DV film on iPhone routed media-direct and PiP subtitles silently never worked for them; iOS now treats `AVPlayer.eligibleForHDRPlayback` as panel readiness.
+- **Subtitle rendition names and selection.** Duplicate same-language rendition NAMEs collapsed AVFoundation's legible options, and the option matcher compared raw container tags against normalized language tags, selecting a wrong-language rendition in PiP. Names are unique now, forced tracks declare `FORCED=YES`, and matching goes through the ISO-synonym table with no cross-language fallback.
+- **Backward-seek restart latency cluster (#93 residual).** The wedged-restart fresh reopen no longer re-pays the full first-open probe budget; waiting segment fetches ride an in-flight restart instead of burning fixed retry budgets into 503s (and never re-fire restarts at stale indices); lazy native subtitle readers defer while a restart is executing instead of competing for the starved link.
 
 ## [4.9.1] - 2026-07-02
 

@@ -83,6 +83,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// Synchronous teardown + relaunch at the given absolute segment index.
     private let restartHandler: ((Int) -> Void)?
+    /// True while the engine's restart coalescer has an in-flight run (#93 residual): waiting
+    /// fetches ride it instead of burning fixed retry budgets, and never re-fire at stale indices.
+    private let restartActivity: (() -> Bool)?
+    /// Base index of the active producer (#93 residual): a fetch for an index within the
+    /// producer's forward march window waits for the march instead of tearing it down.
+    private let activeProducerBase: (() -> Int?)?
 
     /// Base index of the engine's current producer. Guards against stale-producer waits:
     /// abs(index - lastRestartIndex) <= 2 = cold start, wait; larger = restart needed.
@@ -100,9 +106,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// #50: re-asserting reposition wait. Sliced waits re-fire restart only when lastRestartIndex
     /// changed (orphan signature: #35 coalescer's single slot was overwritten by a newer scrub).
-    /// Slice is generous enough to absorb a cold 4K-HDR first-GOP decode.
-    private static let repositionWaitSlice: TimeInterval = 8.0
+    /// Slice is generous enough to absorb a cold 4K-HDR first-GOP decode. Instance lets so the
+    /// wait shape is testable without 8 s sleeps (#93 residual).
+    private let repositionWaitSlice: TimeInterval
     private static let repositionMaxWaits = 3
+    /// Hard cap on riding an in-flight restart (#93 residual): a fetch waits past the fixed
+    /// budget while a restart is genuinely executing, but never indefinitely.
+    private let repositionRideCapSeconds: TimeInterval
 
     // MARK: - Playlist state
 
@@ -133,6 +143,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         blockingReloadEnabled: Bool = true,
         targetDurationFloorSeconds: Double? = nil,
         restartHandler: ((Int) -> Void)? = nil,
+        restartActivity: (() -> Bool)? = nil,
+        activeProducerBase: (() -> Int?)? = nil,
+        initialRestartIndex: Int = 0,
+        repositionWaitSlice: TimeInterval = 8.0,
+        repositionRideCapSeconds: TimeInterval = 90.0,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
         nativeSubtitleLanguages: [String?] = [],
         nativeSubtitleRenditionInfos: [NativeSubtitleRenditionInfo] = [],
@@ -155,6 +170,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
         self.restartHandler = restartHandler
+        self.restartActivity = restartActivity
+        self.activeProducerBase = activeProducerBase
+        self._lastRestartIndex = initialRestartIndex
+        self.repositionWaitSlice = repositionWaitSlice
+        self.repositionRideCapSeconds = repositionRideCapSeconds
         self.nativeSubStores = nativeSubtitleStores
         self.nativeSubLanguages = nativeSubtitleLanguages
         self.nativeSubRenditionInfos = nativeSubtitleRenditionInfos
@@ -279,10 +299,23 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return cache.peekURL(index: index)
     }
 
+    /// Total media-segment requests seen (both serve paths). The #65 consumer re-engage watchdog
+    /// reads this after a wedge re-anchor: an unchanged count means AVPlayer stopped requesting
+    /// entirely and needs a host-side nudge (#93 residual).
+    var mediaFetchCount: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _mediaFetchCount
+    }
+    private var _mediaFetchCount: UInt64 = 0
+
     /// Shared by mediaSegment(at:) and mediaSegmentURL(at:). Without sharing, back-scrubs served
     /// via sendfile (cache hits) skip the proactive restart entirely, leaving seg-11+ to fall into
     /// a reactive prune-gap restart with AVPlayer's buffer at its thinnest.
     private func handleTargetChange(to index: Int) {
+        stateLock.lock()
+        _mediaFetchCount += 1
+        stateLock.unlock()
         let previousTarget = cache.targetIndex
         cache.declareTarget(index)
 
@@ -380,20 +413,60 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         if needsRestart, let restart = restartHandler {
             // #50: re-fire restart per slice only when lastRestartIndex changed (orphan: #35 coalescer
             // slot overwritten by newer scrub; producer settles elsewhere; plain 30 s wait 404s).
-            for attempt in 0..<Self.repositionMaxWaits {
-                if attempt == 0 || lastRestartIndex != index {
-                    EngineLog.emit(
-                        "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
-                        category: .session
-                    )
-                    lastRestartIndex = index
-                    restart(index)
-                    // Reset highWater AFTER restart() returns (synchronous: old producer has exited).
-                    // Pre-restart reset would be clobbered by the old producer's final write re-bumping
-                    // highWater, re-arming producerPassedAndPruned and cascading into per-segment restarts.
-                    cache.resetHighWaterForRestart()
+            // #93 residual: while a restart is in flight, the fetch RIDES it (slices don't consume
+            // the fixed budget, bounded by repositionRideCapSeconds) and never fires its own,
+            // possibly stale, index into the coalescer's pending slot. The fixed budget applies
+            // only while no restart is executing.
+            let rideDeadline = DispatchTime.now() + repositionRideCapSeconds
+            var attempt = 0
+            var firedThisCall = false
+            while attempt < Self.repositionMaxWaits {
+                if restartActivity?() == true {
+                    if DispatchTime.now() > rideDeadline {
+                        break
+                    }
+                } else {
+                    // #93 residual: a fetch whose index was JUST restarted to (lastRestartIndex ==
+                    // index) waits for the producer to deliver instead of re-firing; each AVPlayer
+                    // re-request otherwise tore down the fresh producer mid-capture (device: three
+                    // back-to-back restarts at the same index, one dropped frame each). The #50
+                    // same-index orphan (producer settled elsewhere) is covered by one backstop
+                    // re-fire on the final attempt. An index the ACTIVE producer demonstrably
+                    // covers (base <= index <= base + forward window) never fires OR backstops:
+                    // the march will deliver it, and the backstop killed a 75%-complete capture
+                    // on device while a forward-march neighbor got its healthy producer restarted.
+                    let producerCovers: Bool = {
+                        guard let base = activeProducerBase?() else { return false }
+                        return base <= index && index - base <= Self.forwardWaitWindow
+                    }()
+                    // A request superseded by a NEWER declared target is an orphan of a skip
+                    // storm: AVPlayer's newest request is what it actually wants (the same
+                    // newest-wins semantics the coalescer applies to immediate restarts).
+                    // Firing the orphan's index tears down the producer serving the REAL
+                    // playhead (device: a stale seg262 fire evicted the settled base-252
+                    // producer, restarts ping-ponged between stale and playhead indices,
+                    // every capture was discarded and the playhead segment took 19.8 s).
+                    // Orphans wait out their slices and 503; AVPlayer has abandoned them.
+                    let isLatestTarget = cache.targetIndex == index
+                    let orphanBackstop = attempt == Self.repositionMaxWaits - 1
+                        && !firedThisCall && !producerCovers && isLatestTarget
+                    if isLatestTarget
+                        && ((lastRestartIndex != index && !producerCovers) || orphanBackstop) {
+                        EngineLog.emit(
+                            "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
+                            category: .session
+                        )
+                        lastRestartIndex = index
+                        restart(index)
+                        // Reset highWater AFTER restart() returns (synchronous: old producer has exited).
+                        // Pre-restart reset would be clobbered by the old producer's final write re-bumping
+                        // highWater, re-arming producerPassedAndPruned and cascading into per-segment restarts.
+                        cache.resetHighWaterForRestart()
+                        firedThisCall = true
+                    }
+                    attempt += 1
                 }
-                if let bytes = cache.fetch(index: index, timeout: Self.repositionWaitSlice) {
+                if let bytes = cache.fetch(index: index, timeout: repositionWaitSlice) {
                     return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: true)
                 }
             }
