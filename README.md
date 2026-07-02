@@ -134,6 +134,11 @@ player.selectSidecarSubtitle(url: srtURL)      // .srt / .ass / .vtt next to the
 player.clearSubtitle()
 player.$subtitleCues                           // [SubtitleCue]: .text(String) or .image(SubtitleImage)
 
+// Native WebVTT subtitle renditions (subtitles in PiP / AirPlay / external display; opt-in
+// via LoadOptions.prepareNativeSubtitles, details in docs/formats.md)
+player.$nativeSubtitleTracks                   // [NativeSubtitleTrack]: ordinal, language, displayName
+player.setNativeSubtitleSelected(track: 2)     // engage a rendition (e.g. on PiP entry); nil deselects
+
 // Second simultaneous subtitle track (bilingual / language learning)
 player.selectSecondarySubtitleTrack(index: streamID)
 player.selectSecondarySidecarSubtitle(url: srt2URL)
@@ -157,7 +162,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "4.9.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "4.9.1")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -282,10 +287,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface — every `public` declaration in `Sources/AetherEngine/` — is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "4.9.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "4.9.1")
 ```
 
-Pin to `.upToNextMinor(from: "4.9.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "4.9.1")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
