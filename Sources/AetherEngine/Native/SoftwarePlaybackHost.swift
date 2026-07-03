@@ -398,6 +398,10 @@ final class SoftwarePlaybackHost {
 
     private var demuxLoopStarted: Bool = false
 
+    /// #95 audio tap: mirrors every decoded audio CMSampleBuffer to the tap (nil = tap off).
+    /// Set/cleared on the main actor by AetherEngine+AudioTap; invoked on the demux thread.
+    var audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?
+
     func pause() {
         audioOutput?.pause()
         pausedByHost = true

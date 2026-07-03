@@ -570,6 +570,9 @@ public final class AetherEngine: ObservableObject {
     /// Active embedded subtitle stream index, or -1. Used by seek to decide whether to re-arm the side demuxer.
     var activeEmbeddedSubtitleStreamIndex: Int32 = -1
 
+    /// #95 audio tap lifecycle owner; nil when no tap installed. Torn down by stopInternal.
+    var audioTapController: AudioTapController?
+
     /// #77: in-band CEA-608 tap state. The tap owns the cue buffer and publishes snapshots; `ccCueSnapshot`
     /// is the latest, mirrored into `subtitleCues` while the CC track is active.
     var closedCaptionTap: ClosedCaptionTap?
@@ -2105,6 +2108,9 @@ public final class AetherEngine: ObservableObject {
         memoryProbeTask = nil
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
+        // #95: stop the tap reader before the session (and its SegmentCache) goes away.
+        audioTapController?.teardown()
+        audioTapController = nil
         // markClosed() aborts a probe blocked in avformat_open_input/find_stream_info (lock-free, idempotent).
         inFlightProbeDemuxer?.markClosed()
         liveTelemetrySampler?.stop()
