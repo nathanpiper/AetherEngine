@@ -14,7 +14,7 @@ private func smbTestRun(_ args: [String]) async -> Int32 {
     do {
         let u = try SMBURL.parse(rawURL)
         let started = ProcessInfo.processInfo.systemUptime
-        print("connecting to \(u.server.absoluteString) share=\(u.share) path=\(u.path) user=\(u.user)")
+        print("connecting to \(u.server.absoluteString) share=\(u.share) path=\(u.path) user=\(u.user.isEmpty ? "(guest/anonymous)" : u.user)")
         let connection = try await SMBConnection.connect(
             server: u.server, share: u.share, path: u.path,
             user: u.user, password: u.password

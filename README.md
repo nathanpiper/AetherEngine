@@ -200,7 +200,7 @@ Seekable readers support audio-track switching and background reload; embedded s
 
 #### SMB shares (optional `AetherEngineSMB` product)
 
-Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([AMSMB2](https://github.com/amosavian/AMSMB2), LGPL-2.1) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core and never pull libsmb2.
+Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT — pure Swift, `NWConnection`-based) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core. The transport is pure Swift over Network.framework rather than libsmb2, which fails with `EPERM` on tvOS/iOS.
 
 ```swift
 import AetherEngineSMB
@@ -213,6 +213,8 @@ try await engine.load(source: .custom(SMBIOReader(source: smb), formatHint: "mat
 ```
 
 Read-only, NTLMv2 / guest auth (no Kerberos). On tvOS the host must declare `NSLocalNetworkUsageDescription` + the local-network entitlement to reach a LAN share. See [`aetherctl smbtest`](docs/cli.md#smbtest) to validate a share from macOS.
+
+Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SMB3 transport encryption or AES-CMAC signing. Servers configured SMB3-only or with `smb encrypt = required` won't connect (libsmb2 spoke 3.1.1 here, but was itself unusable on tvOS/iOS — see above).
 
 ### Live TV / DVR
 

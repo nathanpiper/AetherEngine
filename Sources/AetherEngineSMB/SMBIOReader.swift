@@ -18,10 +18,10 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
     private var position: Int64 = 0
     private var didClose = false
     /// Per-read in-flight state, published so cancel() (a different thread) can both cancel the
-    /// background work and, crucially, unblock read()'s semaphore wait. AMSMB2's libsmb2 read is
-    /// not cancellation-aware (only an internal ~60s timeout resolves the continuation), so
-    /// task.cancel() alone could not wake the wait and teardown blocked up to 60s; cancel() now
-    /// signals the semaphore directly and read() aborts.
+    /// background work and, crucially, unblock read()'s semaphore wait. The underlying SMB read
+    /// is an in-flight network round-trip that task.cancel() may not interrupt promptly (it can
+    /// block until the connection times out), so task.cancel() alone could not reliably wake the
+    /// wait and teardown could stall; cancel() now signals the semaphore directly and read() aborts.
     private final class Inflight: @unchecked Sendable {
         let task: Task<Void, Never>
         let semaphore: DispatchSemaphore
@@ -56,7 +56,7 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
         }
         inFlightLock.withLock { $0 = Inflight(task: task, semaphore: semaphore) }
         semaphore.wait()
-        // cancel() may have signalled to unblock teardown while the libsmb2 read is still running.
+        // cancel() may have signalled to unblock teardown while the SMB read is still running.
         // In that case do NOT read `outcome`: the background Task may still be writing it (the
         // semaphore's happens-before edge only covers the Task's own signal). Abort with -1 instead.
         let wasCancelled = inFlightLock.withLock { state -> Bool in
@@ -100,12 +100,12 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
         inFlightLock.withLock { state in
             state?.cancelled = true
             state?.task.cancel()
-            state?.semaphore.signal()   // wake read()'s wait; the libsmb2 op drains in the background
+            state?.semaphore.signal()   // wake read()'s wait; the SMB op drains in the background
         }
     }
 
     public func makeIndependentReader() -> IOReader? {
-        // Range reads are stateless and SMB2Manager is thread safe, so the
+        // Range reads are serialised per connection by SMBClient, so the
         // independent reader shares the connection but never owns its teardown.
         SMBIOReader(source: source, ownsSource: false)
     }

@@ -30,7 +30,11 @@ let package = Package(
         // Resolved over Git rather than a local path so consumers (and
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
         .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "1.0.1"),  // 1.0.2: FFmpeg n8.1.2 + dca_core bitstream filter (#64)
-        .package(url: "https://github.com/amosavian/AMSMB2", from: "4.0.3"),
+        // Pure-Swift SMB2 client (MIT) that speaks the protocol over
+        // NWConnection. Replaces AMSMB2/libsmb2, which EPERMs on tvOS/iOS.
+        // Pinned to the 0.3.x minor: SMBClient is pre-1.0 with an actively
+        // moving API, so allow patch updates but not a minor bump.
+        .package(url: "https://github.com/kishikawakatsumi/SMBClient", .upToNextMinor(from: "0.3.1")),
         // libdovi (Dolby Vision RPU parser/converter). Resolved over Git like
         // FFmpegBuild so consumers (and Xcode Cloud) build without a sibling
         // LibDovi checkout; the prebuilt xcframework needs no Rust at build time.
@@ -56,7 +60,7 @@ let package = Package(
             name: "AetherEngineSMB",
             dependencies: [
                 "AetherEngine",
-                .product(name: "AMSMB2", package: "AMSMB2"),
+                .product(name: "SMBClient", package: "SMBClient"),
             ],
             path: "Sources/AetherEngineSMB"
         ),

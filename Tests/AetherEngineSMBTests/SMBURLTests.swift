@@ -11,9 +11,12 @@ final class SMBURLTests: XCTestCase {
         XCTAssertEqual(u.path, "Movies/film.mkv")
     }
 
-    func testGuestWhenNoCredentials() throws {
+    func testEmptyUserWhenNoCredentials() throws {
+        // An omitted username parses to empty — SMBConnection.connect maps that
+        // to the guest-then-anonymous fallback; the parser must not fabricate
+        // "guest" or that fallback would never fire.
         let u = try SMBURL.parse("smb://nas.local/public/clip.mp4")
-        XCTAssertEqual(u.user, "guest")
+        XCTAssertEqual(u.user, "")
         XCTAssertEqual(u.password, "")
         XCTAssertEqual(u.share, "public")
         XCTAssertEqual(u.path, "clip.mp4")

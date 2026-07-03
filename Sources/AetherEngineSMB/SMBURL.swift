@@ -1,7 +1,10 @@
 import Foundation
 
 /// Parses an `smb://[user[:password]@]host[:port]/share/path/to/file` URL into
-/// connection parts. Missing credentials default to guest.
+/// connection parts. An omitted username is left empty (not substituted with
+/// "guest"): `SMBConnection.connect` treats an empty username as "no account"
+/// and drives the guest-then-anonymous fallback itself. Substituting "guest"
+/// here would make that fallback unreachable for credential-less URLs.
 public struct SMBURL: Sendable {
     public let server: URL
     public let share: String
@@ -34,7 +37,7 @@ public struct SMBURL: Sendable {
             server: server,
             share: segments[0],
             path: segments.dropFirst().joined(separator: "/"),
-            user: comps.user ?? "guest",
+            user: comps.user ?? "",
             password: comps.password ?? ""
         )
     }

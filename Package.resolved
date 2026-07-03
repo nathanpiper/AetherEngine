@@ -1,21 +1,12 @@
 {
-  "originHash" : "fc22b962aa887705ec43c3de0be41a17c77ade62cad323b0c9ef0d88ae10faf6",
+  "originHash" : "159958c403e07fd446f641ae63b76a1080ff31cc2612f8d2d44ae89397a2c074",
   "pins" : [
-    {
-      "identity" : "amsmb2",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/amosavian/AMSMB2",
-      "state" : {
-        "revision" : "1726aaaf7adf63d7d1d2a0c5d1b0e635028215c0",
-        "version" : "4.0.3"
-      }
-    },
     {
       "identity" : "ffmpegbuild",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
-        "revision" : "86d985a790cc32b5b9e03d5971c21b6cc6373c60",
+        "revision" : "5329cdd58d000373fc85fd19dc30ddceac6a4985",
         "version" : "1.0.3"
       }
     },
@@ -26,6 +17,15 @@
       "state" : {
         "revision" : "bebab0af0e3633b0002fcc7106ea6fc7ceea8277",
         "version" : "1.0.2"
+      }
+    },
+    {
+      "identity" : "smbclient",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kishikawakatsumi/SMBClient",
+      "state" : {
+        "revision" : "e636c2b2458930770932a36d311ec9d478575b90",
+        "version" : "0.3.1"
       }
     }
   ],
