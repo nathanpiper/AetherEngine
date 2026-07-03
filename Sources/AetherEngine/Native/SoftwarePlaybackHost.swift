@@ -398,6 +398,12 @@ final class SoftwarePlaybackHost {
 
     private var demuxLoopStarted: Bool = false
 
+    /// #95 audio tap: mirrors every decoded audio CMSampleBuffer to the tap (nil = tap off).
+    /// Set/cleared on the main actor by AetherEngine+AudioTap; read per packet on the demux and
+    /// feeder threads (same unsynchronized-flag pattern as `_isPlaying`; worst case one buffer
+    /// reaches a just-removed sink).
+    nonisolated(unsafe) var audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?
+
     func pause() {
         audioOutput?.pause()
         pausedByHost = true
@@ -519,7 +525,8 @@ final class SoftwarePlaybackHost {
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
         videoTimeBaseSeconds: Double,
-        audioTimeBaseSeconds: Double
+        audioTimeBaseSeconds: Double,
+        audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?
     ) -> Bool {
         let tbSec = pkt.isVideo ? videoTimeBaseSeconds : audioTimeBaseSeconds
         guard tbSec > 0, !pkt.bytes.isEmpty else { return false }
@@ -545,6 +552,7 @@ final class SoftwarePlaybackHost {
         } else if let aDec = audioDecoder, let aOut = audioOutput {
             var enqueued = false
             for buf in aDec.decode(packet: p) {
+                audioTapSink?(buf)   // #95: mirror before enqueue
                 aOut.enqueue(sampleBuffer: buf)
                 enqueued = true
             }
@@ -615,6 +623,10 @@ final class SoftwarePlaybackHost {
         }
         let getIsPlaying: @Sendable () -> Bool = { [weak self] in self?.isPlaying ?? false }
         let getStopRequested: @Sendable () -> Bool = { [weak self] in self?.stopRequested ?? true }
+        // #95: resolved per packet so a tap installed mid-session is picked up by running loops.
+        let getAudioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?) = { [weak self] in
+            self?.audioTapSink
+        }
         let onError: @Sendable (String) -> Void = { [weak self] msg in
             Task { @MainActor [weak self] in self?.failureMessage = msg }
         }
@@ -691,7 +703,8 @@ final class SoftwarePlaybackHost {
                     sourceEnded: getSourceEnded,
                     clockArmed: getClockArmed,
                     markClockArmed: setClockArmed,
-                    onEnd: onEnd
+                    onEnd: onEnd,
+                    audioTapSink: getAudioTapSink
                 )
             }
             return
@@ -721,7 +734,8 @@ final class SoftwarePlaybackHost {
                 seekGeneration: getSeekGeneration,
                 backgroundAudioOnly: getBackgroundAudioOnly,
                 onError: onError,
-                onEnd: onEnd
+                onEnd: onEnd,
+                audioTapSink: getAudioTapSink
             )
         }
     }
@@ -890,7 +904,8 @@ final class SoftwarePlaybackHost {
         sourceEnded: @Sendable () -> Bool,
         clockArmed: @Sendable () -> Bool,
         markClockArmed: @Sendable () -> Void,
-        onEnd: @Sendable () -> Void
+        onEnd: @Sendable () -> Void,
+        audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?)
     ) {
         while !stopRequested() {
             if !isPlaying() {
@@ -960,7 +975,8 @@ final class SoftwarePlaybackHost {
                 videoStreamIndex: videoStreamIndex,
                 audioStreamIndex: audioStreamIndex,
                 videoTimeBaseSeconds: videoTimeBaseSeconds,
-                audioTimeBaseSeconds: audioTimeBaseSeconds
+                audioTimeBaseSeconds: audioTimeBaseSeconds,
+                audioTapSink: audioTapSink()
             )
 
             // Arm clock once on first packet PTS (anchoring at .zero caused delay). Audio: first decoded buffers; video-only: first video packet (no clock without audio = frozen frame).
@@ -1002,7 +1018,8 @@ final class SoftwarePlaybackHost {
         seekGeneration: @Sendable () -> UInt64,
         backgroundAudioOnly: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
-        onEnd: @Sendable () -> Void
+        onEnd: @Sendable () -> Void,
+        audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?)
     ) {
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
@@ -1193,7 +1210,9 @@ final class SoftwarePlaybackHost {
                 audioPacketsSeen += 1
                 let buffers = aDec.decode(packet: packet)
                 if !buffers.isEmpty { audioBuffersProduced = true }
+                let tapSink = audioTapSink()
                 for buf in buffers {
+                    tapSink?(buf)   // #95: mirror before enqueue
                     aOut.enqueue(sampleBuffer: buf)
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
