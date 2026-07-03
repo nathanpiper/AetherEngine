@@ -8,7 +8,9 @@ Versioning follows [Semantic Versioning](https://semver.org). See
 [README › Stability and versioning](README.md#stability-and-versioning) for
 the public-API contract.
 
-## [Unreleased]
+## [4.11.0] - 2026-07-03
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.11.0))
 
 ### Fixed
 
