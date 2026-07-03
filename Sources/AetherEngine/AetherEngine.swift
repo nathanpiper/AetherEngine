@@ -339,7 +339,9 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Reads `AVPlayer.eligibleForHDRPlayback` and `AVPlayer.availableHDRModes` at call time.
-    /// macOS reports the built-in display only and may under-report external displays.
+    /// Eligibility is display-configuration aware on all platforms (its change notification fires
+    /// on display connection/disconnection), so per-load reads pick up monitor changes; the value
+    /// is device-wide, not per-window, so mixed HDR/SDR multi-display Macs read eligible (#98).
     public static var displayCapabilities: DisplayCapabilities {
         #if os(tvOS) || os(iOS)
         let hdrEligible = AVPlayer.eligibleForHDRPlayback
