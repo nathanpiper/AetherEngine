@@ -199,7 +199,7 @@ Seekable readers support audio-track switching and background reload; embedded s
 
 #### SMB shares (optional `AetherEngineSMB` product)
 
-Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([AMSMB2](https://github.com/amosavian/AMSMB2), LGPL-2.1) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core and never pull libsmb2.
+Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT — pure Swift, `NWConnection`-based) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core. The transport is pure Swift over Network.framework rather than libsmb2, which fails with `EPERM` on tvOS/iOS.
 
 ```swift
 import AetherEngineSMB
