@@ -220,6 +220,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var connGeneration = 0
     private var activeSession: URLSession?
     private var activeTask: URLSessionDataTask?
+    // #93 restart latency diagnostics (winCond-guarded): bytes dropped by the stale-generation
+    // guard, plus per-generation time-to-first-data tracking.
+    private var staleGenDroppedBytes: Int64 = 0
+    private var connStartedAt = DispatchTime.now()
+    private var connFirstDataSeen = false
     // Consecutive unproductive reconnects (demux-thread-only).
     private var unproductiveReconnects = 0
     private var bytesAtLastReconnect: Int64 = 0
@@ -725,6 +730,33 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let requestSize = Int(size)
         var totalRead = 0
 
+        // #93 restart latency: accumulate where THIS read spends its time; one summary line fires
+        // on completion when the whole call exceeded the threshold (see SlowReadDiagnostics).
+        let readStart = DispatchTime.now()
+        var diag = SlowReadDiagnostics()
+        func msSince(_ t: DispatchTime) -> Double {
+            Double(DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000
+        }
+        winCond.lock()
+        let diagEntryPosition = position
+        let diagGenAtStart = connGeneration
+        let diagDropsAtStart = staleGenDroppedBytes
+        winCond.unlock()
+        defer {
+            let elapsedMs = msSince(readStart)
+            if elapsedMs >= diag.thresholdMs {
+                winCond.lock()
+                let genAtEnd = connGeneration
+                let dropped = staleGenDroppedBytes - diagDropsAtStart
+                winCond.unlock()
+                diag.recordStaleGenerationDrop(bytes: dropped)
+                if let line = diag.line(elapsedMs: elapsedMs, offset: diagEntryPosition,
+                                        generationSpan: (diagGenAtStart, genAtEnd)) {
+                    EngineLog.emit(line, category: .demux)
+                }
+            }
+        }
+
         while totalRead < requestSize {
             if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
             if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
@@ -734,6 +766,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if activeTask == nil {
                 let target = position
                 winCond.unlock()
+                diag.recordReconnect()
                 seekReconnect(at: target)
                 continue
             }
@@ -751,13 +784,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     // the cheap window path instead of fetching 4 MB blocks forever.
                     if curPosition == detourRunNextExpected && detourRunBytes >= Self.detourReanchorBytes {
                         detourResetRun()
+                        diag.recordReconnect()
                         seekReconnect(at: curPosition)
                         continue
                     }
+                    let detourStart = DispatchTime.now()
                     switch serveFromDetour(into: buf.advanced(by: totalRead),
                                            maxLen: requestSize - totalRead,
                                            at: curPosition, allowFetch: true) {
                     case .served(let n):
+                        // A resident-block hit is a pure memcpy (sub-ms); anything slower crossed the network.
+                        let detourMs = msSince(detourStart)
+                        diag.recordDetourServe(ms: detourMs, fetched: detourMs > 2)
                         winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
                         totalRead += n
                         unproductiveReconnects = 0
@@ -773,16 +811,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                             EngineLog.emit("[AVIOReader] Detour rate-limit gave up at offset \(curPosition) (\(rateLimitStreak) consecutive 429/503)", category: .demux)
                             return totalRead > 0 ? Int32(totalRead) : -1
                         }
+                        let backoffStart = DispatchTime.now()
                         backoffBeforeReconnect(streak: rateLimitStreak, retryAfter: retryAfter)
+                        diag.recordBackoff(ms: msSince(backoffStart))
                         continue
                     case .miss:
                         if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
                         if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
                         // Hard transport failure: degrade to the OLD single-reconnect behavior.
+                        diag.recordReconnect()
                         seekReconnect(at: curPosition)
                         continue
                     }
                 }
+                diag.recordReconnect()
                 seekReconnect(at: curPosition)
                 continue
             }
@@ -829,6 +871,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                                            maxLen: requestSize - totalRead,
                                            at: curPosition, allowFetch: false) {
                     case .served(let n):
+                        diag.recordDetourServe(ms: 0, fetched: false)   // resident-only path
                         winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
                         totalRead += n
                         unproductiveReconnects = 0
@@ -840,6 +883,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         break   // allowFetch:false never rate-limits; a miss falls through to reconnect
                     }
                 }
+                diag.recordReconnect()
                 seekReconnect(at: curPosition)
                 continue
             }
@@ -847,8 +891,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if !ended {
                 // Wait for the live connection to fill forward. A false return
                 // means connStallTimeout elapsed with no data (socket stall).
+                let waitStart = DispatchTime.now()
                 let signaled = winCond.wait(until: min(Date(timeIntervalSinceNow: Self.connStallTimeout), readDeadline))
                 winCond.unlock()
+                diag.recordStallWait(ms: msSince(waitStart), signaled: signaled)
                 // Check deadline before stall handling to avoid misrouting a
                 // deadline wake as a socket stall (which would reconnect).
                 if isPastReadDeadline { continue }
@@ -864,7 +910,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     EngineLog.emit("[AVIOReader] Persistent stall at offset \(frontier), reconnecting", category: .demux)
                     lastUnplannedReconnectAt = Date()
                     emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
+                    let backoffStart = DispatchTime.now()
                     backoffBeforeReconnect(streak: unproductiveReconnects, retryAfter: 0)
+                    diag.recordBackoff(ms: msSince(backoffStart))
+                    diag.recordReconnect()
                     startPersistentConnection(at: frontier)
                 }
                 continue
@@ -891,7 +940,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
+            let backoffStart = DispatchTime.now()
             backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
+            diag.recordBackoff(ms: msSince(backoffStart))
+            diag.recordReconnect()
             startPersistentConnection(at: frontier)
         }
 
@@ -1087,6 +1139,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connEnded = false
         connStatus = 0
         connRetryAfter = 0
+        connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
+        connFirstDataSeen = false
         let oldSession = activeSession
         activeSession = nil
         activeTask = nil
@@ -1138,8 +1192,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     fileprivate func appendPersistentData(_ data: Data, generation: Int) {
         winCond.lock()
         guard generation == connGeneration, !isFullyClosed else {
+            // #93: a slow read's summary line reports how much data the stale-generation
+            // guard discarded while the read waited.
+            staleGenDroppedBytes += Int64(data.count)
             winCond.unlock()
             return
+        }
+        var firstDataMs: Double? = nil
+        if !connFirstDataSeen {
+            connFirstDataSeen = true
+            firstDataMs = Double(DispatchTime.now().uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
         }
         let count = data.count
         let base = window.count
@@ -1160,6 +1222,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             _ = winCond.wait(until: Date(timeIntervalSinceNow: 0.2))
         }
         winCond.unlock()
+        #if DEBUG
+        if let firstDataMs {
+            EngineLog.emit("[AVIOReader] gen=\(generation) first data after \(Int(firstDataMs))ms",
+                           category: .demux)
+        }
+        #endif
     }
 
     fileprivate func persistentReceivedResponse(

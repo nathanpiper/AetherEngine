@@ -1660,6 +1660,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return min(max(lo - 1, 0), segmentPlan.count - 1)
     }
 
+    /// #93 restart latency: phase split for the "restart took" line, so a slow restart names the
+    /// phase that ate the time (old-pump stop wait, wedged-reopen, demuxer seek, producer build).
+    nonisolated static func restartPhaseSummary(
+        stopWaitMs: Double, reopenMs: Double?, seekMs: Double, buildMs: Double
+    ) -> String {
+        var parts = ["stopWait=\(Int(stopWaitMs))ms"]
+        if let reopenMs { parts.append("reopen=\(Int(reopenMs))ms") }
+        parts.append("seek=\(Int(seekMs))ms")
+        parts.append("build=\(Int(buildMs))ms")
+        return parts.joined(separator: " ")
+    }
+
     // Driven exclusively through requestRestart(at:) so bursts coalesce (#35).
     private func performRestart(at idx: Int) {
         restartGate.lock()
@@ -1679,6 +1691,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         restartLock.unlock()
 
         let restartStart = DispatchTime.now()
+        func msSince(_ t: DispatchTime) -> Double {
+            Double(DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000
+        }
+        var stopWaitMs: Double = 0
+        var reopenMs: Double? = nil
+        var seekMs: Double = 0
 
         // The new producer reuses this demuxer unless we have to replace a wedged one (#79, below).
         var activeDem = dem
@@ -1686,6 +1704,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if let old {
             old.stop()
             let ok = old.waitForFinish(timeout: 5.0)
+            stopWaitMs = msSince(restartStart)
             if !ok {
                 // #79: the old pump is wedged in a blocking network read on the SHARED demuxer; stop() can't
                 // unblock a socket read, so waitForFinish timed out. Reusing this demuxer makes the new
@@ -1697,6 +1716,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // (no regression) rather than poisoning the only demuxer. Scoped to the VOD single-demuxer
                 // scrub case; the side-source / live-reopen paths keep their existing behaviour.
                 if !isLiveSession, sideAudioDemuxer == nil {
+                    let reopenStart = DispatchTime.now()
                     let fresh = Demuxer()
                     do {
                         // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
@@ -1719,6 +1739,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                             category: .session
                         )
                     }
+                    reopenMs = msSince(reopenStart)
                 } else {
                     EngineLog.emit(
                         "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it "
@@ -1737,9 +1758,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
         // Seek outside restartLock (network-bound). Concurrent stop() calls markClosed() so the
         // seek fails fast instead of racing teardown.
+        let seekStart = DispatchTime.now()
         activeDem.seek(to: absoluteTargetSeconds)
         // Re-arm bridge PTS rebase so the encoder timeline starts from the new demuxer cursor.
         ab?.startSegment()
+        seekMs = msSince(seekStart)
 
         // Re-validate: a stop() landing during waits bumped sessionEpoch; don't resurrect into a torn-down session.
         restartLock.lock()
@@ -1773,9 +1796,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             return
         }
 
-        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
+        let elapsedMs = msSince(restartStart)
+        // build = everything after the seek (re-validation, muxer/producer construction, start).
+        let buildMs = max(0, elapsedMs - stopWaitMs - (reopenMs ?? 0) - seekMs)
         EngineLog.emit(
-            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s [absolute source-PTS], restart took \(String(format: "%.0f", elapsedMs))ms)",
+            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s [absolute source-PTS], restart took \(String(format: "%.0f", elapsedMs))ms; "
+            + Self.restartPhaseSummary(stopWaitMs: stopWaitMs, reopenMs: reopenMs, seekMs: seekMs, buildMs: buildMs) + ")",
             category: .session
         )
     }

@@ -1134,8 +1134,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private enum PacketOrigin { case main, side }
 
+    /// Pump-thread-only: has the first source read of this producer been timed yet (#93 latency)?
+    private var pumpFirstReadLogged = false
+
     /// Returns next packet in global decode order. Single-demuxer fast path; dual-demuxer yields lower-DTS first.
+    /// #93 restart latency: the FIRST read of a producer is timed (one line; info when it exceeded
+    /// 1 s), because rrgomes' trace shows exactly that read waiting 19-46 s client-side while a
+    /// fresh side reader overtakes it in 300 ms.
     private func readNextSourcePacket() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
+        guard !pumpFirstReadLogged else { return try readNextSourcePacketMerged() }
+        pumpFirstReadLogged = true
+        let t0 = DispatchTime.now()
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+            EngineLog.emit(
+                "[HLSSegmentProducer] first source read after start took \(Int(ms))ms",
+                category: .session, level: ms > 1000 ? .info : .verbose
+            )
+        }
+        return try readNextSourcePacketMerged()
+    }
+
+    private func readNextSourcePacketMerged() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
         guard let side = sideAudioDemuxer else {
             guard let packet = try demuxer.readPacket() else { return nil }
             return (packet, .main)
