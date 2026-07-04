@@ -176,6 +176,16 @@ public struct LoadOptions: Sendable, Equatable {
     /// are overlay-only until the next load. Default empty.
     public var externalSubtitles: [ExternalSubtitleTrack]
 
+    /// Forward-buffer window of the loopback HLS session, in segments (one segment ~ 4 s): how far the
+    /// producer may race ahead of the playhead AND how many forward segments the on-disk cache keeps
+    /// resident (the two are coupled by construction, see `SegmentCache`). Larger values buffer more of
+    /// the source up front (network-dropout robustness) at the cost of disk (segments are disk-backed,
+    /// mmap reads) and ahead-of-time demux work: 4K HEVC runs ~ 10 MB per segment, so 150 segments can
+    /// occupy ~ 1.5 GB on disk. The engine clamps to 4...150 (below 4 AVPlayer's own ~ 5-7-segment
+    /// prefetch would starve, see `LiveWindowSizing.minSafeSegments`). nil keeps the historical default
+    /// of 10 (~ 40 s). Ignored for `nativeRemoteHLS`, where AVPlayer talks to the remote server directly.
+    public var forwardBufferSegments: Int?
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -199,7 +209,8 @@ public struct LoadOptions: Sendable, Equatable {
         maxAnalyzeDuration: Int64? = nil,
         preferredAudioLanguages: [String] = [],
         preferredSubtitleLanguages: [String] = [],
-        externalSubtitles: [ExternalSubtitleTrack] = []
+        externalSubtitles: [ExternalSubtitleTrack] = [],
+        forwardBufferSegments: Int? = nil
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -221,6 +232,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredAudioLanguages = preferredAudioLanguages
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
+        self.forwardBufferSegments = forwardBufferSegments
     }
 }
 

@@ -170,7 +170,8 @@ extension AetherEngine {
             companionAudioReader: companionAudioReader,
             // Caller-bounded probe budget (#68) for the fallback open / live reopen; the happy path reuses preopenedDemuxer.
             probesize: loadedOptions.probesize,
-            maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration
+            maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration,
+            forwardBufferSegments: loadedOptions.forwardBufferSegments
         )
         session.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }

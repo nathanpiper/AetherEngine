@@ -478,7 +478,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceReopenableByURL: Bool = true,
         companionAudioReader: IOReader? = nil,
         probesize: Int64? = nil,
-        maxAnalyzeDuration: Int64? = nil
+        maxAnalyzeDuration: Int64? = nil,
+        forwardBufferSegments: Int? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
@@ -505,6 +506,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.preopenedDemuxer = preopenedDemuxer
         self.sourceReopenableByURL = sourceReopenableByURL
         self.companionAudioReader = companionAudioReader
+        self.forwardWindowSegments = Self.clampedForwardWindow(forwardBufferSegments)
+    }
+
+    /// Session forward-buffer window in segments. Drives BOTH the producer's race-ahead
+    /// (`HLSSegmentProducer.bufferAheadSegments`) and the cache's forward window
+    /// (`SegmentCache.forwardWindow`); the two MUST stay identical (a drift is exactly what stalls
+    /// AVPlayer, see `SegmentCache`). From `LoadOptions.forwardBufferSegments`; nil -> historical 10.
+    let forwardWindowSegments: Int
+
+    /// Clamp for `forwardWindowSegments`: below 4 the window would undercut AVPlayer's own ~5-7-segment
+    /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`); above 150 (~10 min at 4 s
+    /// segments, ~1.5 GB disk for 4K HEVC) the disk and ahead-of-time demux cost stops being worth it.
+    /// nil keeps the historical default of 10.
+    static func clampedForwardWindow(_ requested: Int?) -> Int {
+        min(max(requested ?? 10, 4), 150)
     }
 
     /// When true, `start()` skips the VOD duration guard / cue prewarm / precomputed plan and
@@ -763,7 +779,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let retentionBudget = isLiveSession
             ? 0
             : Self.vodRetentionBudgetBytes(volumeAvailableBytes: availableBytes)
-        let segmentCache = SegmentCache(retentionBudgetBytes: retentionBudget)
+        let segmentCache = SegmentCache(forwardWindow: forwardWindowSegments,
+                                        retentionBudgetBytes: retentionBudget)
         self.cache = segmentCache
         EngineLog.emit(
             "[HLSVideoEngine] segment retention budget: \(retentionBudget / (1 << 20)) MiB "
@@ -1488,7 +1505,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             segmentBoundaries: segmentBoundaries,
             isLive: isLiveSession,
             packedSideAudioStartPts: packedSideAudioStartPts,
-            packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts
+            packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
+            bufferAheadSegments: forwardWindowSegments
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()

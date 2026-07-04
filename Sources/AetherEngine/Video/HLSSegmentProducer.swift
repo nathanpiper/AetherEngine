@@ -343,8 +343,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var videoShiftPts: Int64 = Int64.min
     private var audioShiftPts: Int64 = Int64.min
 
-    /// Max segments ahead of AVPlayer's highest fetched segment (cut from 20 to 10; 4K HEVC ~10 MB/seg = 200 MB old buffer).
-    private static let bufferAheadSegments = 10
+    /// Max segments ahead of AVPlayer's highest fetched segment. Historically a constant (cut from 20 to
+    /// 10; 4K HEVC ~10 MB/seg = 200 MB old buffer); now per session from `LoadOptions.forwardBufferSegments`
+    /// via `HLSVideoEngine.forwardWindowSegments`. MUST equal the SegmentCache's forwardWindow so the muxer
+    /// never writes past the cache's forward edge (a drift is exactly what stalls AVPlayer).
+    private let bufferAheadSegments: Int
 
     /// #65 stall diag: only log a park once it exceeds ~2 segment durations of zero playback progress, so normal
     /// backpressure (releases within one segment) stays silent and a real wedge surfaces its frozen tuple.
@@ -572,8 +575,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         segmentBoundaries: [Int64],
         isLive: Bool = false,
         packedSideAudioStartPts: Int64? = nil,
-        packedSideAudioFallbackDurationPts: Int64 = 0
+        packedSideAudioFallbackDurationPts: Int64 = 0,
+        bufferAheadSegments: Int = 10
     ) throws {
+        self.bufferAheadSegments = bufferAheadSegments
         self.demuxer = demuxer
         self.sideAudioDemuxer = sideAudioDemuxer
         // Packed side audio: synthesize timestamps from ID3 PRIV anchor; TS-side sessions use real timestamps.
@@ -855,7 +860,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // or is about to (anchored start). seg0 sessions are unaffected (their target is negative
         // and releases immediately).
         if initialSegmentIndex != baseIndex {
-            let backpressureTarget = initialSegmentIndex - Self.bufferAheadSegments
+            let backpressureTarget = initialSegmentIndex - bufferAheadSegments
             if !awaitBackpressureRelease(target: backpressureTarget, head: initialSegmentIndex, context: "alloc") { return nil }
         }
         if checkShouldStop() { return nil }
@@ -1002,7 +1007,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return nil
         }
         currentMuxerSegmentIndex = newIdx
-        let backpressureTarget = newIdx - Self.bufferAheadSegments
+        let backpressureTarget = newIdx - bufferAheadSegments
         if !awaitBackpressureRelease(target: backpressureTarget, head: newIdx, context: "advance") { return nil }
         if checkShouldStop() { return nil }
 
