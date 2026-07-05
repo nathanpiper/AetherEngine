@@ -167,6 +167,7 @@ extension AetherEngine {
             closedCaptionTap = nil
             ccCueSnapshot = []
             ccLastSnapshotSeq = 0
+            ccNativeStore = nil
             return
         }
         let idx = Int32(ccTrack.id)
@@ -189,6 +190,10 @@ extension AetherEngine {
         guard seq > ccLastSnapshotSeq else { return }
         ccLastSnapshotSeq = seq
         ccCueSnapshot = snapshot
+        // #98: keep the native rendition store current with the full tap buffer (replaceCues handles
+        // roll-up end-time updates), independent of which subtitle is actively selected, so the
+        // rendition is ready the moment the user selects 608.
+        ccNativeStore?.replaceCues(snapshot)
         guard isSubtitleActive(for: .primary), activeEmbeddedSubtitleStreamIndex == ccStreamIndex else { return }
         subtitleCues = snapshot
     }

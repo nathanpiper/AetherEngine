@@ -356,6 +356,25 @@ extension AetherEngine {
             }
             session.nativeSubtitleDefaultOrdinal = defaultOrdinal
             nativeSubtitleDefaultOrdinal = defaultOrdinal
+            // #98: bridge the in-band CEA-608 track into a native rendition. Its cues come from the
+            // ClosedCaptionTap (no FFmpeg decoder, so the side-demuxer reader self-skips it), so we
+            // append a store the tap fills and expose it as the last native subtitle ordinal. Never
+            // the default: 608 is user-selected.
+            if let ccTrack = subtitleTracks.first(where: { Self.isEmbeddedClosedCaptionCodec($0.codec) }) {
+                let ccStore = NativeSubtitleCueStore()
+                self.ccNativeStore = ccStore
+                let ccOrdinal = session.nativeSubtitleCueStoresForSession.count
+                let ccName = ccTrack.language.map { "CC (\($0))" } ?? "Closed Captions"
+                session.nativeSubtitleCueStoresForSession.append(ccStore)
+                session.nativeSubtitleLanguagesForSession.append(ccTrack.language)
+                session.nativeSubtitleRenditionInfosForSession.append(
+                    NativeSubtitleRenditionInfo(language: ccTrack.language, name: ccName, isForced: false))
+                session.nativeSubtitleSourceStreamIndicesForSession.append(Int32(ccTrack.id))
+                nativeSubtitleTrackTable.append(
+                    NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
+                nativeSubtitleTracks.append(
+                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName))
+            }
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
             // Sodalite#32: whole-program renders reliably but is anchored to the stream start, so it breaks on
