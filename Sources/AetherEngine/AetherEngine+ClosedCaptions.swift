@@ -14,7 +14,7 @@ import Libavutil
 /// The engine mirrors that snapshot into `subtitleCues` while the CC track is the active subtitle.
 ///
 /// Because the tap holds the full buffer, enabling CC mid-playback shows captions instantly (mirror the
-/// snapshot — no producer restart), and a seek that re-pumps an overlapping region can't create duplicate
+/// snapshot, no producer restart), and a seek that re-pumps an overlapping region can't create duplicate
 /// cues (the single buffer owns them). `makeProducer` re-threads the observer onto every restart, so it
 /// survives seek/reload/wedge with no second connection.
 ///
@@ -48,11 +48,11 @@ final class ClosedCaptionTap: @unchecked Sendable {
 
     /// Monotonic snapshot sequence. The MainActor hops are unstructured Tasks with no ordering guarantee,
     /// so a burst of rapid publishes (fast initial pump) could land a STALE snapshot after a fresh one and
-    /// overwrite it — captions then render with un-trimmed provisional ends (too early / back-to-back).
+    /// overwrite it, captions then render with un-trimmed provisional ends (too early / back-to-back).
     /// The engine drops any snapshot whose seq is older than the last it applied.
     private var publishSeq = 0
     /// Set from the MainActor on `seek()`; consumed on the next ingest to drop decoder + buffer state at a
-    /// known discontinuity. A plain `Bool` write/read across threads is benign here — at worst a reset is
+    /// known discontinuity. A plain `Bool` write/read across threads is benign here, at worst a reset is
     /// applied one packet late. Preferred over a wall-clock PTS-gap heuristic, which false-fires on the
     /// long no-caption gaps (silence / music) that are normal for a sparse caption track.
     private var resetRequested = false
@@ -86,8 +86,8 @@ final class ClosedCaptionTap: @unchecked Sendable {
 
         // Discontinuity: an explicit seek (resetRequested) or a backward PTS jump means the producer
         // re-anchored. Drop stale decoder state AND the cue buffer so the old region can't bleed across the
-        // cut (or duplicate when the new region is re-pumped). A forward PTS gap is NOT treated as a seek —
-        // it's a normal silence/music gap in a sparse caption track.
+        // cut (or duplicate when the new region is re-pumped). A forward PTS gap is NOT treated as a seek.
+        // It's a normal silence/music gap in a sparse caption track.
         if resetRequested || (lastPTS >= 0 && pts < lastPTS - 1.0) {
             resetRequested = false
             decoder.reset()
@@ -159,7 +159,7 @@ extension AetherEngine {
     }
 
     /// Create the CC tap and wire it onto the video session before `start()` so the first producer keeps
-    /// the CC stream. The tap runs for the whole session (CC packets are sparse — negligible cost) and
+    /// the CC stream. The tap runs for the whole session (CC packets are sparse, negligible cost) and
     /// maintains the cue buffer; cues are mirrored into `subtitleCues` only while CC is the active subtitle.
     /// No-op when the source has no in-band CC track.
     func setupClosedCaptionTapIfNeeded(session: HLSVideoEngine) {

@@ -37,7 +37,7 @@ final class CEA608Decoder {
     private var rollBaseRow = CEA608Decoder.rowCount - 1
 
     /// Last control pair processed, for doubled-control-code suppression. Mirrors FFmpeg's `prev_cmd`:
-    /// set on every processed control pair, cleared only after a standard character pair — so a control
+    /// set on every processed control pair, cleared only after a standard character pair, so a control
     /// transmitted twice is processed once, and even a 3× burst stays suppressed until a different pair
     /// arrives (NOT re-applied as the old self-clearing logic did).
     private var lastControlPair: (UInt8, UInt8)?
@@ -92,7 +92,7 @@ final class CEA608Decoder {
         }
         // Character writes only change the *displayed* screen in roll-up / paint-on (pop-on builds into
         // the hidden buffer). Emitting per character would spam a cue per keystroke in roll-up, which is
-        // wrong — FFmpeg emits per completed line. So display snapshots are produced only by the control
+        // wrong, FFmpeg emits per completed line. So display snapshots are produced only by the control
         // codes that actually flip/roll/erase the screen (see handleMiscControl), never here.
         return []
     }
@@ -146,33 +146,33 @@ final class CEA608Decoder {
 
     private func handleMiscControl(_ b1: UInt8) -> [Action] {
         switch b1 {
-        case 0x20:  // RCL — Resume Caption Loading (pop-on)
+        case 0x20:  // RCL: Resume Caption Loading (pop-on)
             mode = .popOn
             return []
-        case 0x21:  // BS — Backspace
+        case 0x21:  // BS: Backspace
             backspace()
             return emitIfChanged()
-        case 0x24:  // DER — Delete to End of Row
+        case 0x24:  // DER: Delete to End of Row
             clearRow(cursorRow, from: cursorCol)
             return emitIfChanged()
-        case 0x25, 0x26, 0x27:  // RU2 / RU3 / RU4 — Roll-up with 2/3/4 rows
+        case 0x25, 0x26, 0x27:  // RU2 / RU3 / RU4: Roll-up with 2/3/4 rows
             let rows = Int(b1 - 0x23)   // 0x25→2, 0x26→3, 0x27→4
             mode = .rollUp(rows)
             rollBaseRow = cursorRow
             return []
-        case 0x29:  // RDC — Resume Direct Captioning (paint-on)
+        case 0x29:  // RDC: Resume Direct Captioning (paint-on)
             mode = .paintOn
             return []
-        case 0x2C:  // EDM — Erase Displayed Memory
+        case 0x2C:  // EDM: Erase Displayed Memory
             displayed = Self.blankScreen()
             return emitIfChanged()
-        case 0x2D:  // CR — Carriage Return (roll-up: roll the window up one row)
+        case 0x2D:  // CR: Carriage Return (roll-up: roll the window up one row)
             if case .rollUp(let rows) = mode { rollUp(rows: rows) }
             return emitIfChanged()
-        case 0x2E:  // ENM — Erase Non-displayed Memory
+        case 0x2E:  // ENM: Erase Non-displayed Memory
             hidden = Self.blankScreen()
             return []
-        case 0x2F:  // EOC — End Of Caption (flip hidden <-> displayed)
+        case 0x2F:  // EOC: End Of Caption (flip hidden <-> displayed)
             swap(&displayed, &hidden)
             return emitIfChanged()
         default:

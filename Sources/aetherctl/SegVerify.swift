@@ -1,7 +1,7 @@
 import Foundation
 import AetherEngine
 
-/// `aetherctl segverify <url> [--from N] [--count K]` — deterministic, headless #92 verifier.
+/// `aetherctl segverify <url> [--from N] [--count K]`, deterministic, headless #92 verifier.
 ///
 /// Starts the engine, then fetches `init.mp4` plus each media segment SEQUENTIALLY from the loopback
 /// server (sequential on purpose: jumping straight to a deep segment triggers a producer restart whose

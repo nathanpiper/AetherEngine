@@ -116,11 +116,11 @@ extension HLSVideoEngine {
             if probeRet < 0 {
                 if sourceIsAtmos {
                     EngineLog.emit(
-                        "[HLSVideoEngine] WARNING: Atmos downgrade — EAC3+JOC stream-copy probe rejected by mp4 muxer (ret=\(probeRet)). "
+                        "[HLSVideoEngine] WARNING: Atmos downgrade, EAC3+JOC stream-copy probe rejected by mp4 muxer (ret=\(probeRet)). "
                         + "Falling back to FLAC bridge: bed channels stay lossless, but object metadata is lost. "
                         + "Source: \(sourceAudioStream?.pointee.codecpar.pointee.profile.description ?? "?") profile, "
                         + "channels=\(sourceAudioStream?.pointee.codecpar.pointee.ch_layout.nb_channels ?? -1). "
-                        + "If you see this in production, capture the source MKV — dec3 extradata reconstruction can recover Atmos.",
+                        + "If you see this in production, capture the source MKV, dec3 extradata reconstruction can recover Atmos.",
                         category: .session
                     )
                 } else {
@@ -155,7 +155,7 @@ extension HLSVideoEngine {
         } else if preferBridge && sourceIsAtmos {
             // EAC3+JOC always stream-copies; a pre-bridge decision is a codec-table bug.
             EngineLog.emit(
-                "[HLSVideoEngine] WARNING: Atmos source pre-routed to FLAC bridge without stream-copy attempt — Atmos lost. Investigate the codec compatibility table.",
+                "[HLSVideoEngine] WARNING: Atmos source pre-routed to FLAC bridge without stream-copy attempt, Atmos lost. Investigate the codec compatibility table.",
                 category: .session
             )
         }

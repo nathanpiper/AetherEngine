@@ -17,7 +17,7 @@ struct CEA608DecoderTests {
     @discardableResult
     private func doubledControl(_ d: CEA608Decoder, _ b0: UInt8, _ b1: UInt8) -> [CEA608Decoder.Action] {
         var out = d.feed(parity(b0), parity(b1))
-        out += d.feed(parity(b0), parity(b1))   // duplicate — must be suppressed
+        out += d.feed(parity(b0), parity(b1))   // duplicate, must be suppressed
         return out
     }
 
@@ -37,14 +37,14 @@ struct CEA608DecoderTests {
     @Test("Pop-on caption shows on EOC and clears on EDM")
     func popOnDisplayAndErase() {
         let d = CEA608Decoder()
-        doubledControl(d, 0x14, 0x20)   // RCL — pop-on
-        doubledControl(d, 0x14, 0x2E)   // ENM — erase hidden
-        doubledControl(d, 0x11, 0x40)   // PAC row 1, col 0 — addresses the hidden buffer
+        doubledControl(d, 0x14, 0x20)   // RCL: pop-on
+        doubledControl(d, 0x14, 0x2E)   // ENM: erase hidden
+        doubledControl(d, 0x11, 0x40)   // PAC row 1, col 0, addresses the hidden buffer
         _ = text(d, "HI")               // writes to hidden buffer; not yet displayed
-        let onEOC = doubledControl(d, 0x14, 0x2F)   // EOC — flip to display
+        let onEOC = doubledControl(d, 0x14, 0x2F)   // EOC: flip to display
         #expect(onEOC.contains(.display("HI")))
 
-        let onEDM = doubledControl(d, 0x14, 0x2C)   // EDM — erase displayed
+        let onEDM = doubledControl(d, 0x14, 0x2C)   // EDM: erase displayed
         #expect(onEDM.contains(.clear))
     }
 
@@ -72,7 +72,7 @@ struct CEA608DecoderTests {
     @Test("Roll-up emits the typed line on carriage return, not per character")
     func rollUpCarriageReturn() {
         let d = CEA608Decoder()
-        doubledControl(d, 0x14, 0x26)   // RU3 — roll-up 3 rows
+        doubledControl(d, 0x14, 0x26)   // RU3: roll-up 3 rows
         doubledControl(d, 0x14, 0x40)   // PAC → base row 13 (bottom area, room to roll up)
         // Characters typed into the roll-up base row must NOT emit a cue each (that was cue-spam);
         // FFmpeg emits per completed line, so the line surfaces on CR.

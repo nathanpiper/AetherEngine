@@ -12,7 +12,7 @@ final class SMBURLTests: XCTestCase {
     }
 
     func testEmptyUserWhenNoCredentials() throws {
-        // An omitted username parses to empty — SMBConnection.connect maps that
+        // An omitted username parses to empty, SMBConnection.connect maps that
         // to the guest-then-anonymous fallback; the parser must not fabricate
         // "guest" or that fallback would never fire.
         let u = try SMBURL.parse("smb://nas.local/public/clip.mp4")

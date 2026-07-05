@@ -3,7 +3,7 @@ import Libavcodec
 @testable import AetherEngine
 
 // #77: `CCDataParser` reads the bare cc_data triplet stream FFmpeg's MOV demuxer emits for a demuxable
-// CEA-608 caption track (`eia_608` / QuickTime `c608`) — the path that ships.
+// CEA-608 caption track (`eia_608` / QuickTime `c608`), the path that ships.
 @Suite("CCDataParser cc_data triplet parsing")
 struct CCDataParserTests {
 

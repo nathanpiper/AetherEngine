@@ -5,7 +5,7 @@ import Libavcodec
 /// QuickTime/MP4 closed-caption track (`c608`). The caption bytes are a real, demuxable subtitle stream:
 /// the demuxer strips the `cdat`/`cdt2` atom wrapper and hands downstream a sequence of
 /// `(cc_valid|cc_type, cc_data_1, cc_data_2)` triplets, which this turns into `CCTriplet`s. Pure byte
-/// parsing — no bitstream decode. (#77)
+/// parsing, no bitstream decode. (#77)
 enum CCDataParser {
 
     /// One `(cc_valid|cc_type, cc_data_1, cc_data_2)` triplet from a `cc_data` block.

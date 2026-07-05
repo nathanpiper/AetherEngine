@@ -20,7 +20,7 @@ final class AudioTapPCMConverterTests: XCTestCase {
         CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil,
                                        magicCookieSize: 0, magicCookie: nil, extensions: nil,
                                        formatDescriptionOut: &fmt)
-        var data = [Float](repeating: 0.25, count: frames * Int(channels))
+        let data = [Float](repeating: 0.25, count: frames * Int(channels))
         var block: CMBlockBuffer?
         let byteCount = data.count * 4
         CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: byteCount,

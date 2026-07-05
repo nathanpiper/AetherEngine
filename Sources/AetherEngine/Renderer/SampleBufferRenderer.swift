@@ -14,9 +14,9 @@ import CoreVideo
 enum DisplayFlushOp: Equatable {
     /// tvOS 18+/iOS 18+/macOS 15+: AVSampleBufferVideoRenderer.flush(removingDisplayedImage:).
     case rendererFlush(removingDisplayedImage: Bool)
-    /// Legacy AVSampleBufferDisplayLayer.flushAndRemoveImage() — clears the visible frame.
+    /// Legacy AVSampleBufferDisplayLayer.flushAndRemoveImage(), clears the visible frame.
     case removeImage
-    /// Legacy AVSampleBufferDisplayLayer.flush() — keeps the last frame on screen (hold through seek).
+    /// Legacy AVSampleBufferDisplayLayer.flush(), keeps the last frame on screen (hold through seek).
     case holdImage
 
     static func resolve(removingDisplayedImage: Bool, modernRenderer: Bool) -> DisplayFlushOp {

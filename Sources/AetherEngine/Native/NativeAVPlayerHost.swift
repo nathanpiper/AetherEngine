@@ -830,7 +830,7 @@ final class NativeAVPlayerHost {
         guard routeChannels > 0, routeChannels < trackChannels else { return }
         EngineLog.emit(
             "[NativeAVPlayerHost] #\(sid) WARNING: FLAC bridge produced \(trackChannels)-channel "
-            + "LPCM but active audio route carries only \(routeChannels) LPCM channels — tvOS "
+            + "LPCM but active audio route carries only \(routeChannels) LPCM channels, tvOS "
             + "will downmix. Common cause: soundbars (Sonos Arc, etc.) accept multichannel only "
             + "via bitstream codecs (EAC3, Atmos, DD+), not LPCM. Stream-copy paths bypass this; "
             + "TrueHD / DTS-HD MA sources route through the FLAC bridge and hit the LPCM limit. "

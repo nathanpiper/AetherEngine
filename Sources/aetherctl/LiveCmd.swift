@@ -417,7 +417,7 @@ private func liveReloadTest(url: URL, seconds playSeconds: Double,
         return 0
     }
     print(String(format: "VERDICT: live-reload FAIL (state=%@, t=%.2fs, clock never advanced "
-                 + ">=3s past the rejoin baseline %@ — the frozen-frame wedge signature)",
+                 + ">=3s past the rejoin baseline %@, the frozen-frame wedge signature)",
                  "\(finalState)", finalTime,
                  baseline.map { String(format: "%.2fs", $0) } ?? "n/a"))
     return 1

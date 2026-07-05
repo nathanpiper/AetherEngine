@@ -114,14 +114,14 @@ final class MP4SegmentMuxer {
     /// ftyp+moov and moof+mdat across calls; gate ensures it only fires once.
     private var moovFlushed: Bool = false
     /// EAC3/AC-3 moov-wedge guard (#92 follow-up): latched once the first audio packet is written so
-    /// the first moov flush can never fire before FFmpeg has parsed an audio packet — mov_write_moov
+    /// the first moov flush can never fire before FFmpeg has parsed an audio packet, mov_write_moov
     /// builds the E-AC-3 `dec3` / AC-3 `dac3` (and TrueHD `dmlp`) sample-entry box from a parsed packet,
     /// and flushing moov video-only errors -22 "Cannot write moov atom before EAC3 packets parsed" and
     /// wedges the muxer.
     private var audioPacketWritten: Bool = false
     /// True only when the audio codec's mp4 sample entry requires a PARSED packet before moov can be
     /// written (AC-3 `dac3`, E-AC-3 `dec3`, TrueHD `dmlp`). AAC and other codecs build their sample entry
-    /// from codecpar alone, so they never wedge — and gating the #64 RAM-cap flush on them would needlessly
+    /// from codecpar alone, so they never wedge, and gating the #64 RAM-cap flush on them would needlessly
     /// weaken that memory bound. Latched at init from the audio codec_id.
     private let audioNeedsParsedPacketForMoov: Bool
     /// Latched when the next staging file open fails; producer must stop the pump.
@@ -455,15 +455,15 @@ final class MP4SegmentMuxer {
         // mov_write_moov errors -22 "Cannot write moov atom before EAC3 packets parsed", the cut fails, and
         // the segment is retried forever (AVPlayer 503 -> forever-loading). AAC never hits this (its sample
         // entry needs no parsed packet). Fix has two parts: (1) latch that an audio packet has been written;
-        // (2) in the video-leads-audio case — the first audio packet arrives after a video packet is already
-        // in the fragment window — proactively flush so moov is emitted WITH a parsed audio packet present
+        // (2) in the video-leads-audio case, the first audio packet arrives after a video packet is already
+        // in the fragment window, proactively flush so moov is emitted WITH a parsed audio packet present
         // rather than waiting for the first cut. In the common backward-seek path the #74 pregate buffer
         // replays captured audio BEFORE the first video look-behind packet, so fragmentWindowFirstVideoDts
-        // is still unset here and this proactive arm is skipped — moov is instead primed correctly at the
+        // is still unset here and this proactive arm is skipped, moov is instead primed correctly at the
         // first cut, which already holds the audio in the interleaver. Idempotent once moovFlushed. Audio
         // routing/placement is untouched, so no audio dropouts. The proactive flush is scoped to
         // AC-3/E-AC-3/TrueHD (audioNeedsParsedPacketForMoov): AAC (and every other codec) never wedges and
-        // must keep the exact stock code path — no extra early fragment flush — so nothing perturbs its audio.
+        // must keep the exact stock code path, no extra early fragment flush, so nothing perturbs its audio.
         if streamIndex == audioOutputStreamIndex {
             audioPacketWritten = true
             if audioNeedsParsedPacketForMoov, !moovFlushed, fragmentWindowFirstVideoDts != Int64.min {
@@ -482,7 +482,7 @@ final class MP4SegmentMuxer {
         guard let ctx = formatContext, headerWritten, fd >= 0 else { return }
         // EAC3/AC-3/TrueHD moov-wedge guard (#92 follow-up): never let a video-only flush emit moov while
         // an audio stream whose sample entry needs a parsed packet is declared but no audio packet has been
-        // written yet — mov_write_moov needs a parsed AC-3/E-AC-3/TrueHD packet for its dac3/dec3/dmlp box
+        // written yet, mov_write_moov needs a parsed AC-3/E-AC-3/TrueHD packet for its dac3/dec3/dmlp box
         // (see writePacket). Scoped to those codecs so AAC (which never wedges) keeps the full #64 RAM-cap
         // bound. Skipping an interim #64 RAM-cap flush is harmless (the interleaver window just grows a
         // little longer); the first audio packet primes moov here or at the first cut (which already holds

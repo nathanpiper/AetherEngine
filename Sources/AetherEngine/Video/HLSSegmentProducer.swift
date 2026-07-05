@@ -478,14 +478,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var playbackPositionProvider: (@Sendable () -> Double?)?
 
     /// #77: in-band CC tap. When `closedCaptionStreamIndex >= 0` that source stream is kept (not
-    /// discarded) and each of its packets is handed to `closedCaptionObserver` (read-only) then dropped —
+    /// discarded) and each of its packets is handed to `closedCaptionObserver` (read-only) then dropped,
     /// never muxed (output byte-identical). Set via init so it's in the keep-set; observer attached after.
     var closedCaptionStreamIndex: Int32 = -1
     var closedCaptionObserver: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
 
     /// Sodalite#32: text-subtitle tap, generalizing the #77 CC tap. Streams in this set are kept by the
     /// pump (not discarded) and each of their packets is handed to `subtitleTapObserver` (with the
-    /// stream's time_base), then dropped below as a foreign packet — never muxed. The pump already reads
+    /// stream's time_base), then dropped below as a foreign packet, never muxed. The pump already reads
     /// the source's full interleave, so harvesting subtitle packets here costs no extra bandwidth: the
     /// session's cue stores fill for exactly the region the producer has produced, across restarts.
     /// Set at init (BEFORE the discard block: a post-init assignment came too late, the demuxer had
@@ -1373,7 +1373,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
                 }
                 // #77: hand the in-band caption-track packet to the observer (read-only). It's a foreign
-                // packet (the eia_608/c608 caption stream) and is dropped below — never muxed.
+                // packet (the eia_608/c608 caption stream) and is dropped below, never muxed.
                 if pktStreamIdx == closedCaptionStreamIndex, let observe = closedCaptionObserver {
                     observe(packet, closedCaptionStreamTimeBase)
                 }

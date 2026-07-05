@@ -52,7 +52,7 @@ final class AudioClockAnchorTests: XCTestCase {
     }
 
     func testFirstBufferAnchorsToItsStartPTS() {
-        var anchor = AudioClockAnchor()
+        let anchor = AudioClockAnchor()
         let start = CMTimeMake(value: 5000, timescale: 1000)
         let r = anchor.resolve(startPTS: start, sampleRate: 44100)
         XCTAssertTrue(r.reanchor)

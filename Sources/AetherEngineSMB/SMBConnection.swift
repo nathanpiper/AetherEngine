@@ -7,7 +7,7 @@ import SMBClient
 /// a pure-Swift SMB2 client that speaks the wire protocol over `NWConnection`
 /// (Network.framework). This replaces the previous AMSMB2/libsmb2 backend, which
 /// failed with POSIX `EPERM` ("Operation not permitted") on the very first
-/// `connectShare` on tvOS (and iOS) — a known, long-standing libsmb2 issue on
+/// `connectShare` on tvOS (and iOS), a known, long-standing libsmb2 issue on
 /// those platforms (AMSMB2 #32/#63/#64). A raw `NWConnection` to port 445
 /// completes a full SMB2 handshake on the same device, so an `NWConnection`-based
 /// client works where libsmb2 does not. The public surface here is unchanged, so
@@ -51,7 +51,7 @@ public final class SMBConnection: ByteRangeSource, @unchecked Sendable {
         // error and must propagate rather than silently downgrading to an
         // anonymous session. Callers signal "no account" with an empty username
         // (see `SMBURL`, which leaves an omitted user empty rather than
-        // substituting "guest" — otherwise this fallback could never fire).
+        // substituting "guest", otherwise this fallback could never fire).
         let account = user.isEmpty ? nil : user
         let secret = password.isEmpty ? nil : password
         let realm = domain.isEmpty ? nil : domain
@@ -93,7 +93,7 @@ public final class SMBConnection: ByteRangeSource, @unchecked Sendable {
         let client = self.client
         Task {
             try? await reader.close()
-            try? await client.logoff()
+            _ = try? await client.logoff()
             // logoff() only ends the SMB session; tear down the underlying TCP
             // connection too so the socket doesn't linger until dealloc.
             client.session.disconnect()

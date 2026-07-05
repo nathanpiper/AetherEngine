@@ -1234,7 +1234,7 @@ extension AetherEngine {
         // Remembered before any guard: the #93 recovery reload replays the host's last request
         // onto the fresh item even when this call raced a not-yet-current player.
         nativeSubtitleReapplyOrdinal = ordinal
-        // #15: lazy readers — run the side-demuxer only while a native track is selected (PiP), idle otherwise.
+        // #15: lazy readers, run the side-demuxer only while a native track is selected (PiP), idle otherwise.
         // Sodalite#32: an eager read-to-EOF reader survives deselect (it is building whole-session coverage;
         // cancelling it on PiP exit left the store frozen at ~48s and every later .vtt served empty).
         if ordinal != nil {

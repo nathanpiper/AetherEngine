@@ -57,7 +57,7 @@ struct DeinterlaceTimebaseTests {
         let maxInput = Double(inputPTS.max()!) * tbSeconds
         for s in outSeconds {
             #expect(s <= maxInput + tbSeconds * 0.5,
-                    "output PTS \(s)s exceeds source range (max \(maxInput)s) — time_base doubled")
+                    "output PTS \(s)s exceeds source range (max \(maxInput)s), time_base doubled")
         }
 
         let sorted = outSeconds.sorted()

@@ -40,7 +40,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         config.httpMaximumConnectionsPerHost = 2
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        // No URLCache instance — kills the in-memory cache that the
+        // No URLCache instance, kills the in-memory cache that the
         // long-lived-session fix from fef8ef4 was working around.
         config.urlCache = nil
         return config

@@ -452,7 +452,7 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     /// Read until end of HTTP headers (`\r\n\r\n`). Returns the raw
-    /// request bytes (headers only — no body, since we only accept
+    /// request bytes (headers only, no body, since we only accept
     /// GET). Returns nil on EOF, error, or oversize.
     private func readHTTPRequest(_ fd: Int32) -> Data? {
         var buffer = Data()
@@ -1046,7 +1046,7 @@ final class HLSLocalServer: @unchecked Sendable {
         let count = snapshot.visibleCount
         let firstVisible = min(snapshot.firstVisible, count)
 
-        // Sodalite#32: whole-program shape — ONE VOD segment spanning the full duration, one .vtt with all cues.
+        // Sodalite#32: whole-program shape, ONE VOD segment spanning the full duration, one .vtt with all cues.
         // The only AVPlayer-reliable sideload structure; the per-segment window made AVKit fetch a couple of
         // sparse segments and never render. TARGETDURATION/EXTINF = full program length (Apple rules 5.5/8.7).
         if provider.nativeSubtitleWholeProgram {

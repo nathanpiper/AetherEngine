@@ -175,8 +175,8 @@ Install via Swift Package Manager:
 
 Two complementary samples ship in `Examples/`:
 
-- [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift) — 90-line SwiftUI drop-in. Copy the file into a new tvOS / iOS / macOS app, point at a URL, run.
-- [`DemoPlayerMac/`](Examples/DemoPlayerMac/README.md) — standalone macOS app for testers. Drop a file on the window, it plays. A notarized universal `.dmg` is attached to every [GitHub Release](https://github.com/superuser404notfound/AetherEngine/releases/latest).
+- [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift): a 90-line SwiftUI drop-in. Copy the file into a new tvOS / iOS / macOS app, point at a URL, run.
+- [`DemoPlayerMac/`](Examples/DemoPlayerMac/README.md): a standalone macOS app for testers. Drop a file on the window, it plays. A notarized universal `.dmg` is attached to every [GitHub Release](https://github.com/superuser404notfound/AetherEngine/releases/latest).
 
 ### Custom input source
 
@@ -200,7 +200,7 @@ Seekable readers support audio-track switching and background reload; embedded s
 
 #### SMB shares (optional `AetherEngineSMB` product)
 
-Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT — pure Swift, `NWConnection`-based) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core. The transport is pure Swift over Network.framework rather than libsmb2, which fails with `EPERM` on tvOS/iOS.
+Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT, pure Swift, `NWConnection`-based) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core. The transport is pure Swift over Network.framework rather than libsmb2, which fails with `EPERM` on tvOS/iOS.
 
 ```swift
 import AetherEngineSMB
@@ -214,7 +214,7 @@ try await engine.load(source: .custom(SMBIOReader(source: smb), formatHint: "mat
 
 Read-only, NTLMv2 / guest auth (no Kerberos). On tvOS the host must declare `NSLocalNetworkUsageDescription` + the local-network entitlement to reach a LAN share. See [`aetherctl smbtest`](docs/cli.md#smbtest) to validate a share from macOS.
 
-Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SMB3 transport encryption or AES-CMAC signing. Servers configured SMB3-only or with `smb encrypt = required` won't connect (libsmb2 spoke 3.1.1 here, but was itself unusable on tvOS/iOS — see above).
+Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SMB3 transport encryption or AES-CMAC signing. Servers configured SMB3-only or with `smb encrypt = required` won't connect (libsmb2 spoke 3.1.1 here, but was itself unusable on tvOS/iOS, see above).
 
 ### Live TV / DVR
 
@@ -287,14 +287,14 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 Browse all of this as a searchable site at **[aetherengine.superuser404.de](https://aetherengine.superuser404.de)**, or read the source Markdown here:
 
-- **[docs/architecture.md](docs/architecture.md)** — the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
-- **[docs/formats.md](docs/formats.md)** — codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
-- **[docs/cli.md](docs/cli.md)** — the `aetherctl` repro CLI (twenty subcommands).
-- **[CHANGELOG.md](CHANGELOG.md)** — per-release index.
+- **[docs/architecture.md](docs/architecture.md)**: the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
+- **[docs/formats.md](docs/formats.md)**: codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
+- **[docs/cli.md](docs/cli.md)**: the `aetherctl` repro CLI (twenty subcommands).
+- **[CHANGELOG.md](CHANGELOG.md)**: per-release index.
 
 ## Stability and versioning
 
-AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface — every `public` declaration in `Sources/AetherEngine/` — is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
+AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
 .package(url: "https://github.com/superuser404notfound/AetherEngine", from: "4.12.1")

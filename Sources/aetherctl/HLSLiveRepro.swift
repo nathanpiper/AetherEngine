@@ -5,7 +5,7 @@ import AetherEngine
 // (content, ad, content, ...) as a sliding live HLS window WITHOUT any
 // timestamp rewriting (unlike LiveFixture), marks the content↔ad seams
 // with EXT-X-DISCONTINUITY, then drives the actual HLSLiveIngestReader →
-// engine.load(source: .custom, isLive) path — exactly Sodalite's direct
+// engine.load(source: .custom, isLive) path, exactly Sodalite's direct
 // live path. Prints the engine's segment-finalize activity so a wedged
 // cutter (SSAI PID switch) is visible as "no new seg-N for a while".
 //

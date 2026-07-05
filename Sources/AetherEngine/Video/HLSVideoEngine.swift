@@ -326,7 +326,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Whether AVPlayer wants to play (`timeControlStatus != .paused`), readable off the main actor. Wired
     /// by AetherEngine to a thread-safe mirror and threaded onto every producer so the VOD backpressure
     /// wedge detector suspends while the consumer is paused (a paused player issues no forward fetch, so its
-    /// frozen fetch target is not a wedge — issue #65 pause false-positive).
+    /// frozen fetch target is not a wedge, issue #65 pause false-positive).
     var playIntentProvider: (@Sendable () -> Bool)?
 
     /// The requested-but-unlanded user seek target (AVPlayer/item clock axis), readable off the main
@@ -649,7 +649,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             if prewarmOK {
                 EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
             } else {
-                EngineLog.emit("[HLSVideoEngine] cue prewarm: capped at \(String(format: "%.1f", prewarmMs))ms (no usable Cues index — index points past EOF or is absent); building plan from whatever keyframes were scanned")
+                EngineLog.emit("[HLSVideoEngine] cue prewarm: capped at \(String(format: "%.1f", prewarmMs))ms (no usable Cues index, index points past EOF or is absent); building plan from whatever keyframes were scanned")
             }
 
             // 3. Build the segment plan. Uses the same cut algorithm as libavformat's hls muxer
@@ -999,7 +999,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let stripAdts = Self.prepareAACForFMP4(audioStream.pointee.codecpar)
                 if stripAdts {
                     EngineLog.emit(
-                        "[HLSVideoEngine] audio: AAC/ADTS from TS — synthesised ASC + stripping ADTS for fMP4 stream-copy (no FLAC bridge)",
+                        "[HLSVideoEngine] audio: AAC/ADTS from TS, synthesised ASC + stripping ADTS for fMP4 stream-copy (no FLAC bridge)",
                         category: .session
                     )
                 }

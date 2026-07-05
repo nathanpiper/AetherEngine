@@ -10,7 +10,7 @@ Depth behind the README's "What it handles" matrix: codec routing, HDR signaling
 
 **Software decode** (`SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`):
 
-- AV1 (libavcodec / dav1d) on devices without HW AV1 — currently all Apple TVs, M1 / M2 Macs, pre-A17-Pro iPhones.
+- AV1 (libavcodec / dav1d) on devices without HW AV1 (currently all Apple TVs, M1 / M2 Macs, pre-A17-Pro iPhones).
 - VP9 and VP8 (libavcodec native) unconditionally, since AVPlayer's HLS pipeline rejects the `vp09` / `vp08` CODECS attributes even where VideoToolbox can HW-decode them.
 - MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1, none of which AVPlayer's HLS-fMP4 pipeline accepts; libavcodec ships native decoders for all three.
 
@@ -56,7 +56,7 @@ The published `videoFormat` starts at `.hdr10` for any BT.2020 / PQ source and f
 | | |
 | --- | --- |
 | Stream-copy (lossless into fMP4) | AAC-LC, AC3, EAC3, FLAC, ALAC. HE-AAC / HE-AACv2 stream-copy when the source carries an AudioSpecificConfig (any movie container) and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR). LATM/LOAS-framed AAC (DVB broadcast framing) always bridges |
-| Bridged (`AudioBridge`) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM — decoded to PCM and re-encoded |
+| Bridged (`AudioBridge`) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM: decoded to PCM and re-encoded |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` preserved through the wrapper |
 
 Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOptions.audioBridgeMode`):
@@ -64,7 +64,7 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 - **`.surroundCompat`** (default): lossy EAC3 at 128 kbps per channel (256 kbps stereo, 768 kbps 5.1). AVPlayer hands the encoded bitstream to HDMI and the sink decodes its own 5.1 mix, so surround works on essentially every modern AVR and soundbar (Sonos Arc, Samsung HW-Q, Bose).
 - **`.lossless`** (opt-in): FLAC up to 7.1 lossless, which AVPlayer decodes to LPCM. Needs an AVR that accepts multichannel LPCM via HDMI (Denon, Marantz, NAD); on soundbars and basic AVRs that handle multichannel only via bitstream codecs the LPCM gets downmixed to stereo at the route.
 
-`.surroundCompat` is the default because the soundbar / basic-AVR install base is the majority. Object metadata (Atmos / TrueHD-MA) is lost in either mode: FFmpeg's EAC3 encoder doesn't produce JOC, and FLAC has no object-channel concept. If a JOC source ever falls through to the bridge the engine logs a loud `WARNING: Atmos downgrade — ...`.
+`.surroundCompat` is the default because the soundbar / basic-AVR install base is the majority. Object metadata (Atmos / TrueHD-MA) is lost in either mode: FFmpeg's EAC3 encoder doesn't produce JOC, and FLAC has no object-channel concept. If a JOC source ever falls through to the bridge the engine logs a loud `WARNING: Atmos downgrade, ...`.
 
 Two bridge lifecycle invariants (issue #99): the encoder PTS counter re-bases onto the first fed packet's (gate-shifted) source PTS on every session start and producer restart, so bridged audio always shares the video's output timeline, including a `load(startPosition:)` resume that anchors mid-file (a 0-based bridge timeline puts the audio track a full resume-offset away from video inside the same fragments, which AVPlayer silently discards). And the EOF tail flush leaves the encoder in FFmpeg's terminal draining state, so the bridge latches that and rebuilds the encoder on the next restart; a VOD pump that still dies with `muxerFailed` gets a bounded producer rebuild instead of stranding the session.
 
