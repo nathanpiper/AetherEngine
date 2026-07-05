@@ -323,7 +323,10 @@ extension AetherEngine {
             NativeSubtitleTrack(ordinal: ordinal, language: info.language, displayName: info.name)
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
-        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
+        // #98: an in-band CEA-608 track (no text track needed) also warrants the native path so its
+        // decoded cues can ride a WebVTT rendition (survives PiP/AirPlay) instead of overlay-only.
+        let hasCC608 = subtitleTracks.contains { Self.isEmbeddedClosedCaptionCodec($0.codec) }
+        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && (hasTextSubtitleTrack || hasCC608)
         // Sodalite#32 Phase 2: tap decoders honor the host's markup preference (overlay renders styled
         // ASS; the WebVTT rendition strips at serve), and decoded tap events feed the overlay directly.
         session.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
@@ -336,7 +339,7 @@ extension AetherEngine {
         // #15: create the native subtitle cue stores BEFORE start() so the VideoSegmentProvider receives the
         // references at init (the WebVTT rendition master tags + /subs endpoints read them; readers fill them
         // lazily on selection). The shift is applied after start() once the playlist shift is known.
-        if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
+        if session.enableNativeSubtitleTrackForSession, (!nativeSubtitleTrackTable.isEmpty || hasCC608) {
             session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
             session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
             session.nativeSubtitleRenditionInfosForSession = renditionInfos
@@ -356,6 +359,25 @@ extension AetherEngine {
             }
             session.nativeSubtitleDefaultOrdinal = defaultOrdinal
             nativeSubtitleDefaultOrdinal = defaultOrdinal
+            // #98: bridge the in-band CEA-608 track into a native rendition. Its cues come from the
+            // ClosedCaptionTap (no FFmpeg decoder, so the side-demuxer reader self-skips it), so we
+            // append a store the tap fills and expose it as the last native subtitle ordinal. Never
+            // the default: 608 is user-selected.
+            if let ccTrack = subtitleTracks.first(where: { Self.isEmbeddedClosedCaptionCodec($0.codec) }) {
+                let ccStore = NativeSubtitleCueStore()
+                self.ccNativeStore = ccStore
+                let ccOrdinal = session.nativeSubtitleCueStoresForSession.count
+                let ccName = ccTrack.language.map { "CC (\($0))" } ?? "Closed Captions"
+                session.nativeSubtitleCueStoresForSession.append(ccStore)
+                session.nativeSubtitleLanguagesForSession.append(ccTrack.language)
+                session.nativeSubtitleRenditionInfosForSession.append(
+                    NativeSubtitleRenditionInfo(language: ccTrack.language, name: ccName, isForced: false))
+                session.nativeSubtitleSourceStreamIndicesForSession.append(Int32(ccTrack.id))
+                nativeSubtitleTrackTable.append(
+                    NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
+                nativeSubtitleTracks.append(
+                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName))
+            }
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
             // Sodalite#32: whole-program renders reliably but is anchored to the stream start, so it breaks on

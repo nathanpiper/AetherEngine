@@ -642,6 +642,12 @@ public final class AetherEngine: ObservableObject {
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 
+    /// Native WebVTT rendition store for the in-band CEA-608 track (#98). The CC tap feeds it (via
+    /// `updateClosedCaptionCues`) so 608 captions ride a native AVKit-selectable rendition and
+    /// survive PiP / AirPlay, not just the overlay. Nil when there is no 608 track or native
+    /// subtitles are off. Set in the load path, cleared with the tap.
+    var ccNativeStore: NativeSubtitleCueStore?
+
     /// Last ordinal the host requested via setNativeSubtitleSelected (nil after a deselect).
     /// The #93 stage-2 recovery reload swaps AVPlayerItems and legible selection is per-item,
     /// so the reload re-applies this to keep an active rendition (PiP) rendering. Cleared with
