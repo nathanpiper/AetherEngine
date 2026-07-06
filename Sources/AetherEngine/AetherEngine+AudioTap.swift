@@ -47,6 +47,15 @@ extension AetherEngine {
         audioTapController = nil
     }
 
+    /// Whether the installed tap has a live delivery source. Read synchronously right after
+    /// `installAudioTap()`: false means the stream will finish without yielding (no session,
+    /// video-only source, or a backend with no tap path), so the host can fail loudly instead
+    /// of awaiting an empty stream.
+    @MainActor
+    public var audioTapHasDeliverySource: Bool {
+        audioTapController?.hasDeliverySource ?? false
+    }
+
     @MainActor
     private func makeNativeTapReader(controller: AudioTapController) -> LoopbackAudioReader? {
         guard let session = nativeVideoSession,
