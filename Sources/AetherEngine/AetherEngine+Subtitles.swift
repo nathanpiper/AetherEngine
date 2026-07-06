@@ -1441,4 +1441,36 @@ extension AetherEngine {
         }
         setNativeSubtitleSelected(track: ordinal)
     }
+
+    /// Sodalite#38: the native WebVTT legible rendition exists only for PiP / AirPlay; fullscreen uses the
+    /// host's on-frame overlay. AVKit AUTO-SELECTS the legible group at readyToPlay when the user has a
+    /// system caption preference (Accessibility "Closed Captions + SDH", or a preferred subtitle language),
+    /// which overrides the rendition's DEFAULT=NO,AUTOSELECT=NO, and the forced system caption WINDOW (the
+    /// grey box) cannot be styled transparent via textStyleRules. So pin the group DESELECTED at load:
+    /// await its options (available around readyToPlay), then re-assert `select(nil)` past AVKit's ready-time
+    /// auto-select. A manual deselect sticks (device-confirmed: the PiP round-trip workaround, which ends in
+    /// exactly this deselect, cleared the subtitle), so the loop only has to win the timing race, not fight a
+    /// forced re-selection. Bails the instant the host requests a native track (`setNativeSubtitleForPiP` /
+    /// PiP or AirPlay entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
+    /// when native subtitles are not prepared (no legible group, e.g. tvOS overlay-only).
+    func forceNativeLegibleDeselectedUntilHostSelects() {
+        guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+                  !group.options.isEmpty else { return }
+            var attempts = 0
+            while attempts < 6,
+                  self.nativeSubtitleReapplyOrdinal == nil,
+                  self.currentAVPlayer?.currentItem === item {
+                self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
+                if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
+                    item.select(nil, in: group)
+                    EngineLog.emit("[AetherEngine] Sodalite#38 native legible force-deselected (attempt \(attempts))", category: .engine)
+                }
+                attempts += 1
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
 }

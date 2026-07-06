@@ -697,6 +697,7 @@ extension AetherEngine {
                   perFrameHDR: true,
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin))
+        forceNativeLegibleDeselectedUntilHostSelects()
     }
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
