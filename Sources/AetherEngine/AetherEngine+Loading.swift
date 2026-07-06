@@ -496,16 +496,6 @@ extension AetherEngine {
         if currentAVPlayer !== host.avPlayer {
             self.currentAVPlayer = host.avPlayer
         }
-        // Sodalite#38: pin manual legible selection BEFORE the item loads so AVFoundation never
-        // auto-engages a WebVTT subtitle rendition at readyToPlay. DEFAULT=NO,AUTOSELECT=NO stops
-        // language-match auto-select, but a system caption/subtitle preference (Accessibility
-        // "Closed Captions + SDH", or a preferred subtitle language) counts as the "explicit user
-        // request" the HLS spec lets a NO rendition honor, so AVKit still lit the rendition on first
-        // play (device: subtitles on by default until a menu toggle or PiP round-trip cleared them).
-        // The on-frame overlay owns fullscreen subtitles; the host drives the legible group
-        // explicitly (setNativeSubtitleSelected, which also pins this flag) only for PiP. No audio
-        // rendition group on the loopback master (audio is in-band), so this only affects legible.
-        host.avPlayer.appliesMediaSelectionCriteriaAutomatically = false
 
         nativeCancellables.removeAll()
         host.$currentTime
