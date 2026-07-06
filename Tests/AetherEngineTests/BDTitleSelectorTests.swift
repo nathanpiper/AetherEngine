@@ -50,4 +50,45 @@ final class BDTitleSelectorTests: XCTestCase {
         XCTAssertEqual(titles[0].chapters.map(\.startTicks), [0, 1_350_000, 2_700_000])
         XCTAssertEqual(titles[0].titleInfo().chapterCount, 3)
     }
+
+    // MARK: - Repeated-clip decoy demotion (AE#105)
+
+    // Anti-rip Blu-rays (e.g. TRON: Legacy 4K) pad PLAYLIST with a decoy .mpls that references one
+    // short menu/loop clip hundreds of times, inflating its declared duration to 5+ hours while the
+    // demuxer only ever probes the first clip's ~76s of PTS. Duration-max selection crowned that decoy
+    // as the main title, so scrubbing/snapshots past 76s landed past the demuxer's EOF and came back
+    // blank. The real feature is a single-clip 2:05 title and must win.
+    private func decoyPlaylist() -> MPLSPlaylist {
+        MPLSPlaylist(clipIDs: ["00046"] + Array(repeating: "00038", count: 252),
+                     durationTicks: 872_865_000)  // 5:23:17, but really one looped 76s clip
+    }
+    private func featurePlaylist() -> MPLSPlaylist {
+        MPLSPlaylist(clipIDs: ["00070"], durationTicks: 337_860_000)  // 2:05:08, a single real clip
+    }
+
+    func test_selectMainTitleIgnoresRepeatedClipDecoy() {
+        XCTAssertEqual(BDTitleSelector.selectMainTitle([decoyPlaylist(), featurePlaylist()]),
+                       featurePlaylist())
+    }
+
+    func test_enumerateTitlesDemotesRepeatedClipDecoy() {
+        let titles = BDTitleSelector.enumerateTitles([decoyPlaylist(), featurePlaylist()])
+        XCTAssertEqual(titles.first?.bdClipIDs, ["00070"])          // real feature is the main title (id 0)
+        XCTAssertFalse(titles.contains { $0.bdClipIDs == decoyPlaylist().clipIDs })  // decoy dropped entirely
+    }
+
+    func test_enumerateTitlesKeepsDecoyWhenItIsTheOnlyPlaylist() {
+        // Never leave a disc with zero titles: if every playlist is a decoy, expose them anyway.
+        let titles = BDTitleSelector.enumerateTitles([decoyPlaylist()])
+        XCTAssertEqual(titles.count, 1)
+    }
+
+    func test_isRepeatedClipDecoyToleratesLightClipReuse() {
+        // Seamless-branching / multi-angle titles legitimately reuse a clip a couple of times. A clip
+        // that appears twice in a four-clip title is NOT a decoy; only a single clip dominating the
+        // PlayItem list is.
+        let branching = MPLSPlaylist(clipIDs: ["A", "B", "A", "C"], durationTicks: 5_400_000)
+        XCTAssertFalse(BDTitleSelector.isRepeatedClipDecoy(branching))
+        XCTAssertTrue(BDTitleSelector.isRepeatedClipDecoy(decoyPlaylist()))
+    }
 }

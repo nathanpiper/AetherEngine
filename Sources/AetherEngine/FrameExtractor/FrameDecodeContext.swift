@@ -76,6 +76,22 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// a frozen read cannot pin the FrameExtractor's serial decode queue (issue #27).
     static let stillReadDeadlineSeconds: TimeInterval = 8
 
+    /// A still requested more than this many seconds past the demuxer's known duration is treated as
+    /// out of range and clamped (see `clampSeekSeconds`). The grace absorbs rounding on a last-frame scrub.
+    static let pastDurationTolerance: Double = 1.0
+    /// How far inside the end a clamped past-EOF request lands, to reach a safely-decodable frame.
+    static let clampBackoffSeconds: Double = 1.0
+
+    /// Clamp a still-extraction seek target to the demuxer's known duration. Seeking far past EOF
+    /// lands on a garbage/empty frame that decodes "successfully" but is blank (AE#105: a mis-selected
+    /// decoy Blu-ray title whose demuxer knew only 76s while the scrub asked for 611s). Returns the
+    /// request unchanged when the duration is unknown (<= 0) or the request is within tolerance of the
+    /// end; otherwise the last safely-decodable position.
+    static func clampSeekSeconds(requested: Double, duration: Double) -> Double {
+        guard duration > 0, requested > duration + pastDurationTolerance else { return requested }
+        return max(0, duration - clampBackoffSeconds)
+    }
+
     init(url: URL, httpHeaders: [String: String]) {
         self.url = url
         self.httpHeaders = httpHeaders
@@ -229,10 +245,23 @@ final class FrameDecodeContext: @unchecked Sendable {
         // thumbnail gains nothing from it, and snapshot must keep all frames to reach exact PTS.
         ctx.pointee.skip_frame = AVDISCARD_DEFAULT
 
-        demuxer.seek(to: seconds)
+        // Clamp a request past the demuxer's known duration to the last decodable frame: seeking far
+        // past EOF returns a blank garbage frame that still reports success (AE#105). Both the seek and
+        // the forward-decode target below must use the clamped value or snapshot would chase an
+        // unreachable PTS forever.
+        let seekSeconds = Self.clampSeekSeconds(requested: seconds, duration: demuxer.duration)
+        if seekSeconds != seconds {
+            EngineLog.emit(
+                "[FrameExtractor] still past duration: t=\(String(format: "%.2f", seconds))s "
+                + "> duration=\(String(format: "%.2f", demuxer.duration))s; clamped to "
+                + "\(String(format: "%.2f", seekSeconds))s",
+                category: .swPlayback)
+        }
+
+        demuxer.seek(to: seekSeconds)
 
         guard timeBase.num > 0 else { return nil }
-        let targetPTS = Int64((seconds * Double(timeBase.den)) / Double(timeBase.num))
+        let targetPTS = Int64((seekSeconds * Double(timeBase.den)) / Double(timeBase.num))
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard frame != nil else { return nil }
