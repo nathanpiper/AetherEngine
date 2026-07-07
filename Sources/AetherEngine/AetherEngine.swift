@@ -171,6 +171,12 @@ public final class AetherEngine: ObservableObject {
     /// `sourceVideoFormat` for Stats-for-Nerds labels ("Dolby Vision P5"); read from the dvcC record.
     @Published public internal(set) var sourceDVProfile: Int? = nil
 
+    /// Nominal source frame rate (fps) from the container's `avg_frame_rate` (falling back to `r_frame_rate`),
+    /// or nil when the source has no video or libavformat couldn't derive one. Companion to `sourceVideoFormat`
+    /// for Stats-for-Nerds. `LiveTelemetry.observedFps` measures the live rate but is nil on the native AVPlayer
+    /// path (no usable counter); this nominal value fills that gap for the on-screen readout.
+    @Published public internal(set) var sourceVideoFrameRate: Double? = nil
+
     // MARK: - Disc titles / chapters (#67)
 
     /// Selectable titles on the loaded disc image (Blu-ray playlists / DVD titles), longest first so
@@ -1274,6 +1280,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        sourceVideoFrameRate = nil
         sourceVideoWidth = 0
         sourceVideoHeight = 0
 
@@ -1389,6 +1396,7 @@ public final class AetherEngine: ObservableObject {
         // the criteria handshake; see panelHDRAfterHandshake below).
         sourceVideoFormat = detectedFormat
         sourceDVProfile = detectedDVProfileNum
+        sourceVideoFrameRate = detectedRate
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
@@ -2061,6 +2069,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        sourceVideoFrameRate = nil
         sourceVideoWidth = 0
         sourceVideoHeight = 0
         pendingExternalMetadata = []

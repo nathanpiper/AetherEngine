@@ -45,8 +45,10 @@ final class LiveTelemetrySampler {
 
     private var byteWindow = RollingWindow<Int64>(capacity: 10, zero: 0)   // 10-second rolling window
     private var frameWindow = RollingWindow<Int>(capacity: 10, zero: 0)
+    private var bridgeByteWindow = RollingWindow<Int64>(capacity: 10, zero: 0)
 
     private var lastDemuxerBytes: Int64 = 0
+    private var lastBridgeBytes: Int64 = 0
     private var lastFramesEnqueued: Int = 0
     private var sessionStartTime: Date?
     private var sessionStartBytes: Int64 = 0
@@ -63,8 +65,10 @@ final class LiveTelemetrySampler {
         stop()
         byteWindow.reset()
         frameWindow.reset()
+        bridgeByteWindow.reset()
         // Seed from CURRENT counters: a zero seed pushes all pre-start prefetch bytes into tick 1, inflating instant bitrate for ~10 s.
         lastDemuxerBytes = engine?.demuxerBytesFetched ?? 0
+        lastBridgeBytes = engine?.audioBridgeOutputBytesLifetime ?? 0
         lastFramesEnqueued = 0
         sessionStartTime = Date()
         sessionStartBytes = 0
@@ -109,6 +113,19 @@ final class LiveTelemetrySampler {
             averageBitrateMbps = Double(lifetimeBytes) * 8.0 / elapsed / 1_000_000.0
         } else {
             averageBitrateMbps = nil
+        }
+
+        // Live audio-bridge output bitrate from the bridge's cumulative encoded-byte counter. 0 on the
+        // stream-copy / AVPlayer-native / video-only paths (no bridge), which surfaces as nil.
+        let bridgeBytes = engine.audioBridgeOutputBytesLifetime
+        let bridgeBytesThisTick = max(0, bridgeBytes - lastBridgeBytes)
+        lastBridgeBytes = bridgeBytes
+        bridgeByteWindow.push(bridgeBytesThisTick)
+        let audioBridgeBitrateMbps: Double?
+        if bridgeBytes > 0, bridgeByteWindow.count >= 2 {
+            audioBridgeBitrateMbps = Double(bridgeByteWindow.sum) * 8.0 / Double(bridgeByteWindow.count) / 1_000_000.0
+        } else {
+            audioBridgeBitrateMbps = nil
         }
 
         // Per-path: FPS, dropped frames, network throughput, A/V sync gap
@@ -177,6 +194,7 @@ final class LiveTelemetrySampler {
         let snapshot = LiveTelemetry(
             instantBitrateMbps: instantBitrateMbps,
             averageBitrateMbps: averageBitrateMbps,
+            audioBridgeBitrateMbps: audioBridgeBitrateMbps,
             observedFps: observedFps,
             droppedFrameCount: droppedFrameCount,
             forwardBufferSeconds: forwardBufferSeconds,

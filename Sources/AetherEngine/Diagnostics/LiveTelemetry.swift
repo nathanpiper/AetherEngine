@@ -9,6 +9,10 @@ public struct LiveTelemetry: Equatable, Sendable {
     // Enthusiast section
     public let instantBitrateMbps: Double?
     public let averageBitrateMbps: Double?
+    /// Live bitrate of the audio bridge's encoded output, or nil when no bridge is active (stream-copy /
+    /// AVPlayer-native path) or before the first delta. Measured from the bridge's cumulative output-byte
+    /// counter, since the common FLAC bridge is lossless VBR and has no fixed configured rate.
+    public let audioBridgeBitrateMbps: Double?
     public let observedFps: Double?
     public let droppedFrameCount: Int?
     public let forwardBufferSeconds: Double?
@@ -29,6 +33,7 @@ public struct LiveTelemetry: Equatable, Sendable {
     public init(
         instantBitrateMbps: Double?,
         averageBitrateMbps: Double?,
+        audioBridgeBitrateMbps: Double?,
         observedFps: Double?,
         droppedFrameCount: Int?,
         forwardBufferSeconds: Double?,
@@ -46,6 +51,7 @@ public struct LiveTelemetry: Equatable, Sendable {
     ) {
         self.instantBitrateMbps = instantBitrateMbps
         self.averageBitrateMbps = averageBitrateMbps
+        self.audioBridgeBitrateMbps = audioBridgeBitrateMbps
         self.observedFps = observedFps
         self.droppedFrameCount = droppedFrameCount
         self.forwardBufferSeconds = forwardBufferSeconds

@@ -362,6 +362,9 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let language: String?
     /// 2=stereo, 6=5.1, 8=7.1. 0 for non-audio.
     public let channels: Int
+    /// Declared stream bitrate in bits per second from `codecpar.bit_rate`, or 0 when the container
+    /// leaves it unset (common for lossless VBR audio and many MKV audio tracks). For Stats-for-Nerds.
+    public let bitrate: Int64
     public let isDefault: Bool
     /// Container disposition `FORCED` (subtitles meant to show without the user enabling subtitles, e.g.
     /// foreign-dialogue or signs tracks). Drives the subtitle-language ranking in `selectSubtitleIndex`.
@@ -380,12 +383,13 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// (`AetherEngine.externalSubtitleTrackIDBase` + ordinal), not an AVStream index.
     public let isExternal: Bool
 
-    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false) {
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false) {
         self.id = id
         self.name = name
         self.codec = codec
         self.language = language
         self.channels = channels
+        self.bitrate = bitrate
         self.isDefault = isDefault
         self.isForced = isForced
         self.isHearingImpaired = isHearingImpaired

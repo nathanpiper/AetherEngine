@@ -227,6 +227,12 @@ extension AetherEngine {
         nativeVideoSession?.audioBridgeLiveBytes ?? 0
     }
 
+    /// Cumulative encoded-audio bytes the bridge has emitted this session. Zero when bridge is not active
+    /// (stream-copy path or video-only source). The telemetry sampler diffs it into a live bridge output bitrate.
+    var audioBridgeOutputBytesLifetime: Int64 {
+        nativeVideoSession?.audioBridgeOutputBytesLifetime ?? 0
+    }
+
     /// Last A/V gate gap in source-clock ms. 0 before the first audio gate opens.
     var lastAVGapMs: Double {
         nativeVideoSession?.lastAVGapMs ?? 0

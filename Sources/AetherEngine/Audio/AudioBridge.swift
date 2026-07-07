@@ -393,6 +393,12 @@ final class AudioBridge: @unchecked Sendable {
         return Int(av_audio_fifo_size(f))
     }
 
+    /// Cumulative bytes of encoded audio the bridge has emitted this session (sum of every output packet's size).
+    /// Monotonic across producer restarts and encoder rebuilds; the telemetry sampler diffs it into a live output
+    /// bitrate (FLAC is lossless VBR, so a measured rate is the only honest reading). Written only under `opLock`
+    /// on the pump thread; read lock-free for diagnostics, mirroring `liveBytes`.
+    private(set) var outputBytesLifetime: Int64 = 0
+
     /// Snapshot of bytes live in the bridge's growable buffers, for the engine memory probe. Both fields grow on
     /// the FFmpeg side (FIFO reallocs upward, swr delay buffer reallocates on rate/layout shift), so a
     /// monotonically rising value points here vs the segment muxer or HLS server. Costs: two C calls, no allocations.
@@ -510,6 +516,7 @@ final class AudioBridge: @unchecked Sendable {
                 trackedPacketFree(&p)
                 break
             }
+            outputBytesLifetime += Int64(outPkt.pointee.size)
             results.append(outPkt)
         }
         if !results.isEmpty {
@@ -887,6 +894,7 @@ final class AudioBridge: @unchecked Sendable {
                     trackedPacketFree(&p)
                     break
                 }
+                outputBytesLifetime += Int64(outPkt.pointee.size)
                 results.append(outPkt)
             }
         }

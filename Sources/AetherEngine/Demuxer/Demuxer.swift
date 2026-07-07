@@ -647,6 +647,7 @@ public final class Demuxer: @unchecked Sendable {
         let isHearingImpaired = (disposition & AV_DISPOSITION_HEARING_IMPAIRED) != 0
         let isCommentary = (disposition & AV_DISPOSITION_COMMENT) != 0
         let channels = Int(codecpar.pointee.ch_layout.nb_channels)
+        let bitrate = Int64(codecpar.pointee.bit_rate)
 
         // EAC3 profile 30 = JOC (Dolby Atmos on streaming). Lets UI label "Atmos".
         let isAtmos = (codecpar.pointee.codec_id == AV_CODEC_ID_EAC3)
@@ -672,6 +673,7 @@ public final class Demuxer: @unchecked Sendable {
             codec: codecName,
             language: language,
             channels: channels,
+            bitrate: bitrate,
             isDefault: isDefault,
             isForced: isForced,
             isHearingImpaired: isHearingImpaired,
