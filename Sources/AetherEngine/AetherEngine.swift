@@ -2080,13 +2080,36 @@ public final class AetherEngine: ObservableObject {
     }
 
     private func handleExternalPlaybackChange(active: Bool) {
-        guard active != airPlayActive else { return }
-        airPlayActive = active
+        // A wired HDMI external display (USB-C/Lightning-to-HDMI adapter, Sodalite#34) keeps the device as the
+        // stream origin: 127.0.0.1 loopback stays reachable and the panel carries DV/HDR (DrHurt measured his
+        // adapter exposing SDR/HDR/DV in Display & Brightness), so AVPlayer just pushes the already-master
+        // playlist item out fullscreen. No LAN-IP/MEDIA swap, which would strip VIDEO-RANGE=PQ down to SDR.
+        // Only a wireless AirPlay receiver (#86) needs that reload (loopback unreachable, DV/HDR master rejected).
+        let wired = active && Self.isWiredHDMIExternalDisplay()
+        if wired {
+            EngineLog.emit("[AirPlay] external playback active on wired HDMI -> keep loopback + master (DV/HDR passthrough)", category: .engine)
+        }
+        let wantAirPlay = active && !wired
+        guard wantAirPlay != airPlayActive else { return }
+        airPlayActive = wantAirPlay
         // Loopback native path only: remote-HLS is already receiver-reachable. Reload so loadNative rebuilds
         // the playback URL on the LAN IP + media playlist (active) or back on 127.0.0.1 master/media (inactive).
         guard playbackBackend == .native, !loadedOptions.nativeRemoteHLS, loadedURL != nil else { return }
-        EngineLog.emit("[AirPlay] external playback \(active ? "active -> LAN media reload" : "ended -> loopback reload")", category: .engine)
+        EngineLog.emit("[AirPlay] external playback \(wantAirPlay ? "active (wireless) -> LAN media reload" : "ended -> loopback reload")", category: .engine)
         Task { try? await reloadAtCurrentPosition() }
+    }
+
+    /// True when a wired HDMI external display is the active audio output (USB-C/Lightning-to-HDMI adapter).
+    /// `usesExternalPlaybackWhileExternalScreenIsActive` flips `isExternalPlaybackActive` for both a wired screen
+    /// and a wireless AirPlay receiver; the audio route tells them apart (`.HDMI` vs `.airPlay`). Wired keeps the
+    /// loopback + master playlist (Sodalite#34); wireless takes the LAN-IP + MEDIA path (#86). Mirrors the port
+    /// inspection in NativeAVPlayerHost.dumpAudioRoute. iOS-only; external playback never engages on tvOS.
+    nonisolated private static func isWiredHDMIExternalDisplay() -> Bool {
+        #if os(iOS)
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .HDMI }
+        #else
+        return false
+        #endif
     }
 
     /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP and force the MEDIA
