@@ -46,12 +46,4 @@ enum MasterFallbackDecision {
         case .media:         return .none
         }
     }
-
-    /// Superseded by `nextFallbackTarget`; retained until the caller migrates in Task 3 so the package
-    /// keeps compiling task by task. Removed once `advanceDisplayRejectionFallback` lands.
-    static func shouldFallBackToMediaPlaylist(
-        errorCode: Int, servingMasterPlaylist: Bool, alreadyFellBack: Bool
-    ) -> Bool {
-        isDisplayRejectionCode(errorCode) && servingMasterPlaylist && !alreadyFellBack
-    }
 }

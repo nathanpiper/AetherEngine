@@ -725,6 +725,10 @@ public final class AetherEngine: ObservableObject {
     /// session so a media reload that also fails cannot loop. Reset on each load.
     var masterFallbackUsed = false
 
+    /// Position in the #98 display-rejection fallback chain (primaryMaster -> reducedMaster -> media).
+    /// Reset on each load so a repeatedly rejected reload is bounded to one pass per session.
+    var displayRejectionStage: MasterFallbackDecision.FallbackStage = .primaryMaster
+
     /// Start position of the current loopback video load, replayed if the master is rejected and we
     /// reload the media playlist (a startup-failed item has no reliable renderedTime).
     var lastNativeVideoStartPosition: Double = 0
@@ -809,28 +813,56 @@ public final class AetherEngine: ObservableObject {
     /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
     /// Native subtitle rendition selection is per-item, so the host's last request is replayed
     /// onto the fresh item below (an active PiP rendition otherwise silently disappeared).
-    /// React to a display rejecting the served master (#98): if eligible, reload the media playlist
-    /// in place (single-variant, SDR-tone-mappable); otherwise surface the failure normally.
+    /// React to a display rejecting the served master (#98): reload the SDR-signalled reduced master
+    /// (keeps subtitle renditions) first, then the bare media playlist, then surface. Bounded single pass.
     @MainActor
-    func fallBackToMediaPlaylist(_ rejection: DisplayRejection) {
+    func advanceDisplayRejectionFallback(_ rejection: DisplayRejection) {
         guard let host = nativeHost, let session = nativeVideoSession else {
             state = .error(rejection.message)
             return
         }
-        guard MasterFallbackDecision.shouldFallBackToMediaPlaylist(
+        let position = lastNativeVideoStartPosition
+        switch MasterFallbackDecision.nextFallbackTarget(
             errorCode: rejection.code,
-            servingMasterPlaylist: session.servingMasterPlaylist,
-            alreadyFellBack: masterFallbackUsed),
-              let mediaURL = session.mediaPlaylistURL else {
+            currentStage: displayRejectionStage,
+            reducedMasterAvailable: session.sdrMasterPlaylistURL != nil) {
+
+        case .reducedMaster:
+            guard let sdrURL = session.sdrMasterPlaylistURL else {
+                fallBackToBareMedia(host: host, session: session, position: position, code: rejection.code)
+                return
+            }
+            displayRejectionStage = .reducedMaster
+            EngineLog.emit(
+                "[AetherEngine] display rejected the master (code=\(rejection.code)); reloading the "
+                + "SDR-signalled master (subtitle renditions preserved) at "
+                + "\(String(format: "%.2f", position))s",
+                category: .session)
+            host.load(url: sdrURL, startPosition: position, inPlaceSwap: true)
+            host.play()
+
+        case .media:
+            fallBackToBareMedia(host: host, session: session, position: position, code: rejection.code)
+
+        case .none:
             state = .error(rejection.message)
+        }
+    }
+
+    @MainActor
+    private func fallBackToBareMedia(
+        host: NativeAVPlayerHost, session: HLSVideoEngine, position: Double, code: Int
+    ) {
+        guard let mediaURL = session.mediaPlaylistURL else {
+            state = .error("display rejected the stream (code=\(code))")
             return
         }
+        displayRejectionStage = .media
         masterFallbackUsed = true
         session.markServingMediaAfterFallback()
-        let position = lastNativeVideoStartPosition
         EngineLog.emit(
-            "[AetherEngine] display rejected the master (code=\(rejection.code)); falling back to "
-            + "media playlist (SDR tone-mapping, no CC/subtitle renditions) at "
+            "[AetherEngine] display rejected the master (code=\(code)); falling back to the media "
+            + "playlist (SDR tone-mapping, no subtitle renditions) at "
             + "\(String(format: "%.2f", position))s",
             category: .session)
         host.load(url: mediaURL, startPosition: position, inPlaceSwap: true)
@@ -1277,6 +1309,7 @@ public final class AetherEngine: ObservableObject {
         itemDeathConfirmTask = nil
         itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
         masterFallbackUsed = false
+        displayRejectionStage = .primaryMaster
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil
         setPendingRecoverySeekTarget(nil)
