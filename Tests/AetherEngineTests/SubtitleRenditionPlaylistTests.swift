@@ -131,13 +131,18 @@ struct SubtitleRenditionPlaylistTests {
         #expect(!m.contains("FORCED"))
     }
 
-    @Test("forced rendition carries FORCED=YES; full rendition does not")
+    @Test("a source-forced rendition is NOT emitted FORCED=YES (host owns fullscreen subs)")
     func masterForcedAttribute() {
+        // AVKit force-displays a FORCED rendition matching the audio language regardless of
+        // DEFAULT/AUTOSELECT and the CC-off preference, self-engaging a rendition the overlay owns
+        // (Sodalite#38 follow-on: forced German track shown on German audio with subtitles off). The
+        // forced/full pair stays disambiguated by NAME, so neither carries FORCED=YES.
         let provider = MasterMockProvider(renditions: [(0, "ger", "Deutsch", true),
                                                        (1, "ger", "Deutsch 2", false)])
         let m = HLSLocalServer.buildMasterPlaylistText(provider: provider)
-        #expect(m.contains("NAME=\"Deutsch\",LANGUAGE=\"ger\",DEFAULT=NO,AUTOSELECT=NO,FORCED=YES,URI=\"subs_0.m3u8\""))
+        #expect(m.contains("NAME=\"Deutsch\",LANGUAGE=\"ger\",DEFAULT=NO,AUTOSELECT=NO,URI=\"subs_0.m3u8\""))
         #expect(m.contains("NAME=\"Deutsch 2\",LANGUAGE=\"ger\",DEFAULT=NO,AUTOSELECT=NO,URI=\"subs_1.m3u8\""))
+        #expect(!m.contains("FORCED"))
     }
 
     @Test("master omits SUBTITLES when no native subs")

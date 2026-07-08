@@ -1016,10 +1016,13 @@ final class HLSLocalServer: @unchecked Sendable {
             var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
             if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
             mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO"])
-            // FORCED distinguishes same-language forced/full pairs in the legible group. AUTOSELECT
-            // stays NO despite the authoring-spec pairing recommendation: the on-frame overlay owns
-            // fullscreen subtitles, AVKit must never self-engage a rendition (Sodalite#32).
-            if r.isForced { mediaAttrs.append("FORCED=YES") }
+            // Deliberately NO FORCED=YES, even for a source-forced track: AVKit force-displays a FORCED
+            // rendition whose language matches the selected audio regardless of DEFAULT/AUTOSELECT and the
+            // user's CC-off preference, which self-engages a rendition and contradicts the invariant above
+            // (the on-frame overlay owns fullscreen subtitles; the host selects a rendition only on PiP).
+            // A source-forced German track on German audio then rendered with subtitles off (Sodalite#38
+            // follow-on, DV-master path). Same-language forced/full pairs are disambiguated by NAME, not
+            // FORCED. `r.isForced` still rides the published track list so the host can label/pick it.
             mediaAttrs.append("URI=\"subs_\(r.ordinal).m3u8\"")
             lines.append("#EXT-X-MEDIA:\(mediaAttrs.joined(separator: ","))")
         }
