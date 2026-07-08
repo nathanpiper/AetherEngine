@@ -928,10 +928,36 @@ public final class AetherEngine: ObservableObject {
                 attempt += 1
 
             case .fallBackToMedia:
+                // #98 Stage 1.5: before the bare (subtitle-less) media playlist, try the HDR-preserving
+                // reduced master. It keeps HDR10 + subtitle renditions and, being plain hvc1 without DV
+                // signaling, may start where the cold DV handshake did not. One shot; on an SDR external
+                // it is rejected and we fall through to the media step below.
+                if displayRejectionStage == .primaryMaster,
+                   let reducedURL = session.reducedHDRMasterPlaylistURL {
+                    displayRejectionStage = .reducedMaster
+                    EngineLog.emit(
+                        "[AetherEngine] #35 readiness gate: master never produced tracks; trying the "
+                        + "HDR-preserving reduced master (subtitles preserved, DV dropped) at "
+                        + "\(String(format: "%.2f", position))s",
+                        category: .session)
+                    host.load(url: reducedURL, startPosition: position, inPlaceSwap: true)
+                    host.play()
+                    let reducedOutcome = await host.awaitStartupReadiness(
+                        timeoutSeconds: Self.startupGateReloadSeconds)
+                    try checkLoadCurrent(gen)
+                    if reducedOutcome == .ready {
+                        EngineLog.emit(
+                            "[AetherEngine] #35 readiness gate: reduced master started; HDR10 base and "
+                            + "subtitles preserved (DV upgrade dropped this session)",
+                            category: .session)
+                        return
+                    }
+                }
                 guard let mediaURL = session.mediaPlaylistURL else {
                     throw StartupGateFailure(message: startupGateFailureMessage(host))
                 }
                 masterFallbackUsed = true
+                displayRejectionStage = .media
                 session.markServingMediaAfterFallback()
                 EngineLog.emit(
                     "[AetherEngine] #35 readiness gate: master never produced tracks after "
