@@ -1140,6 +1140,16 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
+    /// Off-main declaration of the AVAudioSession category (#114). `setCategory` /
+    /// `setSupportsMultichannelContent` are XPC round-trips to mediaserverd; running them on the main
+    /// thread while the session is already active (a second playback in the same app session, or a live
+    /// route like AirPods) trips Xcode's hang-risk diagnostic and can block the watchdog. The category
+    /// only has to be declared before the FIRST activation, and nothing reads it synchronously at init,
+    /// so we run the pair on a detached task and every load path awaits it before it can activate. This
+    /// keeps issue #24's "declare early, never activate at init" contract; only the blocking XPC call
+    /// leaves the main thread. The closure captures no engine state, so it holds no reference to `self`.
+    private var audioSessionCategoryTask: Task<Void, Never>?
+
     public init() throws {
         // Route av_log into EngineLog before any libav* entry point so probe/load diagnostics are captured.
         FFmpegLogBridge.install()
@@ -1151,18 +1161,29 @@ public final class AetherEngine: ObservableObject {
         // AVAudioSession call can lift that latch, causing 5.1 EAC3 to downmix. AVPlayerViewController
         // owns and activates the session for the native path, letting tvOS auto-negotiate the route.
         // SW/audio renderer paths activate via `activateRendererAudioSession()` since they bypass AVKit.
+        //
+        // Issue #114: the declaration runs off the main thread. See `audioSessionCategoryTask`.
         #if os(iOS) || os(tvOS)
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
-            try session.setSupportsMultichannelContent(true)
-        } catch {
-            EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
+        audioSessionCategoryTask = Task.detached(priority: .userInitiated) {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+                try session.setSupportsMultichannelContent(true)
+                EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+            } catch {
+                EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
+            }
         }
-        EngineLog.emit("[AetherEngine] AVAudioSession: category set, not activated (AVKit drives activation) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
         #endif
 
         setupLifecycleObservers()
+    }
+
+    /// Await the off-main category declaration (#114) so it is guaranteed complete before the first
+    /// AVAudioSession activation. Idempotent: once the task has finished, `.value` returns immediately;
+    /// nil on macOS (no session setup) returns immediately too.
+    func awaitAudioSessionCategoryConfigured() async {
+        await audioSessionCategoryTask?.value
     }
 
     // MARK: - Public load
@@ -1332,6 +1353,11 @@ public final class AetherEngine: ObservableObject {
         sourceVideoBitrate = 0
         sourceVideoWidth = 0
         sourceVideoHeight = 0
+
+        // #114: guarantee the AVAudioSession category is declared (off-main, from init) before any branch
+        // below can activate the session: AVKit on the native/remote-HLS paths, activateRendererAudioSession()
+        // on the SW and audio paths. The task is short and typically already complete, so this rarely suspends.
+        await awaitAudioSessionCategoryConfigured()
 
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
