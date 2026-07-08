@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **PGS subtitles blank for tens of seconds after a seek or audio-track switch (#112).** PGS (Blu-ray) subtitles are stateful and sparse: a line stays on screen from its composition until the next one clears it, often tens of seconds later. The overlay side demuxer seeked to a fixed 2 s before the playhead, so a seek (or the producer restart an audio-track switch triggers) landed after the active line's composition and the line never reconstructed, showing nothing until the next dialogue line. The reader now scans backward in growing steps (2, 6, 18, 54 s, capped at 60 s) until a probe decode confirms the line active at the playhead, then re-seeks there; a genuine dialogue gap is detected via the intervening clear event and stops the scan early, so it costs one extra probe only when a line really is up.
+
 ## [4.12.1] - 2026-07-05
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.12.1))

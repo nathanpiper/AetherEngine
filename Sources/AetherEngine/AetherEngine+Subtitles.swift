@@ -261,6 +261,109 @@ extension AetherEngine {
         return max(startAt, playhead)
     }
 
+    /// #112: outcome of a bitmap-subtitle coverage probe at a candidate seek target.
+    enum BitmapSubtitleProbeOutcome: Equatable {
+        case covered    // a composition active at the target was decoded: reconstruct from here
+        case empty      // the last event at/before the target is a clear: the screen is empty (a real gap)
+        case notFound   // nothing decoded at/before the target: seek further back
+    }
+
+    /// #112: how far back (seconds) the epoch back-scan is allowed to look for a bitmap line's composition.
+    /// A PGS/DVB line displayed longer than this is effectively nonexistent in real content.
+    nonisolated static let bitmapSubtitleBackscanCapSeconds: Double = 60.0
+
+    /// #112: decide the on-screen state at `target` from the ordered events a probe decoded after seeking
+    /// back. PGS lines have no intrinsic end (they persist until the next composition), so the active line is
+    /// simply the last event at/before the target: a composition (`hasCues`) is still up (`.covered`), a clear
+    /// means the screen is empty (`.empty`). No event at/before the target means the seek still landed after the
+    /// active composition (`.notFound`), so the caller scans further back. Events after the target are ignored.
+    nonisolated static func evaluateBitmapSubtitleProbe(
+        eventTimes: [(time: Double, hasCues: Bool)], target: Double
+    ) -> BitmapSubtitleProbeOutcome {
+        var lastActive: Bool?
+        for e in eventTimes {
+            if e.time <= target {
+                lastActive = e.hasCues
+            } else {
+                break
+            }
+        }
+        switch lastActive {
+        case .some(true): return .covered
+        case .some(false): return .empty
+        case .none: return .notFound
+        }
+    }
+
+    /// #112: geometric look-back distances (seconds before the target) the epoch back-scan tries in order,
+    /// growing x3 from 2 s and ending exactly on `cap` so a line displayed up to `cap` is still recovered.
+    nonisolated static func bitmapBackscanDistances(cap: Double) -> [Double] {
+        var out: [Double] = []
+        var back = 2.0
+        while back < cap {
+            out.append(back)
+            back *= 3
+        }
+        out.append(cap)
+        return out
+    }
+
+    /// #112: read subtitle packets forward from the demuxer's current position (already seeked to a candidate
+    /// `target - back`) and decode them with a throwaway decoder up to `target`, then report the screen state
+    /// there. Only the selected stream's packets survive (the caller already applied `discardAllStreamsExcept`),
+    /// so on sparse PGS this is a few KB. Advances the demuxer cursor; the caller re-seeks to the chosen target.
+    nonisolated private static func probeBitmapSubtitleCoverage(
+        demuxer: Demuxer, streamIndex: Int32, target: Double,
+        videoWidth: Int32, videoHeight: Int32
+    ) -> BitmapSubtitleProbeOutcome {
+        guard let stream = demuxer.stream(at: streamIndex),
+              let probe = EmbeddedSubtitleDecoder(
+                  stream: stream, sourceVideoWidth: videoWidth, sourceVideoHeight: videoHeight)
+        else { return .notFound }
+        let tb = stream.pointee.time_base
+        var events: [(time: Double, hasCues: Bool)] = []
+        var packetsRead = 0
+        let packetCap = 4000  // safety bound against a pathological stream; sparse PGS needs a handful
+        while packetsRead < packetCap {
+            guard let pkt = try? demuxer.readPacket() else { break }  // EOF
+            packetsRead += 1
+            if pkt.pointee.stream_index != streamIndex {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+                continue
+            }
+            let event = probe.decode(packet: pkt, streamTimeBase: tb)
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            trackedPacketFree(&p)
+            guard let event, let time = event.cues.first?.startTime ?? event.pgsTrimAt else { continue }
+            events.append((time: time, hasCues: !event.cues.isEmpty))
+            if time > target { break }  // decoded past the target region; no need to read further
+        }
+        return evaluateBitmapSubtitleProbe(eventTimes: events, target: target)
+    }
+
+    /// #112: find a seek target far enough back that decoding forward reconstructs the bitmap line active at
+    /// `target`. Grows the look-back geometrically (`bitmapBackscanDistances`) until a probe reports the line
+    /// covered or the screen genuinely empty, capping the worst case. Returns the chosen seek target; the caller
+    /// must seek the demuxer there (the probe left the cursor past `target`).
+    nonisolated static func backscanBitmapSeekTarget(
+        demuxer: Demuxer, streamIndex: Int32, target: Double,
+        videoWidth: Int32, videoHeight: Int32
+    ) -> Double {
+        let cap = Self.bitmapSubtitleBackscanCapSeconds
+        for back in bitmapBackscanDistances(cap: cap) {
+            let seekTo = max(0, target - back)
+            demuxer.seek(to: seekTo)
+            let outcome = probeBitmapSubtitleCoverage(
+                demuxer: demuxer, streamIndex: streamIndex, target: target,
+                videoWidth: videoWidth, videoHeight: videoHeight)
+            if outcome != .notFound || seekTo <= 0 {
+                return seekTo
+            }
+        }
+        return max(0, target - cap)
+    }
+
     /// Side-demuxer read loop: opens a fresh Demuxer, prewarms MKV cue index by seeking mid-file, seeks to just before the start time, then streams packets through EmbeddedSubtitleDecoder. Paces against the playhead via `embeddedSubtitleReadAheadSeconds` instead of racing to EOF.
     nonisolated private func runEmbeddedSubtitleReader(
         url: URL, reader: IOReader?, formatHint: String?,
@@ -373,7 +476,8 @@ extension AetherEngine {
 
         // -2 s lead-in: PGS/DVB/HDMV need their SETUP segments before the first END/EVENT (#52). On reuse this
         // re-seeks the already-open container to the new playhead, which is the whole point (no re-open).
-        let seekTo = max(0, effectiveStart - 2.0)
+        // Bitmap codecs refine this below via an epoch back-scan (#112); text codecs keep the fixed -2 s.
+        var seekTo = max(0, effectiveStart - 2.0)
         demuxer.seek(to: seekTo)
 
         // #87: a fresh open skips find_stream_info (codec_id comes from the container header / PMT). For the rare
@@ -420,6 +524,19 @@ extension AetherEngine {
         // pre-discard video packet), and re-applied on every entry so a reused demuxer (#76) that was pinned to
         // the previous track's stream is re-pointed at the newly selected one.
         demuxer.discardAllStreamsExcept([streamIndex])
+
+        // #112: bitmap subtitles (PGS/DVB/DVD) are stateful and sparse. The line active at the playhead can have
+        // its composition tens of seconds earlier, so the fixed -2 s lead-in above lands after it and the line
+        // never reconstructs (nothing on screen until the next composition, the "ten or several tens of seconds"
+        // gap ijuniorfu saw after a fast-forward / audio-track switch). Scan backward until a probe confirms the
+        // line active at the playhead (or a genuine dialogue gap), then re-seek there. Runs after the discard so
+        // the probe reads only the selected stream, and before the read loop so the real decoder starts clean.
+        if EmbeddedSubtitleDecoder.isBitmapCodec(decoder.codecID) {
+            seekTo = Self.backscanBitmapSeekTarget(
+                demuxer: demuxer, streamIndex: streamIndex, target: effectiveStart,
+                videoWidth: videoWidth, videoHeight: videoHeight)
+            demuxer.seek(to: seekTo)
+        }
 
         let tb = stream.pointee.time_base
         let streamStartTime = stream.pointee.start_time
