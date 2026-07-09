@@ -1146,15 +1146,18 @@ extension AetherEngine {
     /// system caption preference (Accessibility "Closed Captions + SDH", or a preferred subtitle language),
     /// which overrides the rendition's DEFAULT=NO,AUTOSELECT=NO, and the forced system caption WINDOW (the
     /// grey box) cannot be styled transparent via textStyleRules. So pin the group DESELECTED at load:
-    /// await its options (available around readyToPlay), then re-assert `select(nil)` past AVKit's ready-time
-    /// auto-select. A manual deselect sticks (device-confirmed: the PiP round-trip workaround, which ends in
-    /// exactly this deselect, cleared the subtitle), so the loop only has to win the timing race, not fight a
-    /// forced re-selection. Bails the instant the host requests a native track (`setNativeSubtitleRendering` /
-    /// PiP, AirPlay, or external-display entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from
-    /// then on. A no-op
+    /// `appliesMediaSelectionCriteriaAutomatically = false` is set SYNCHRONOUSLY here, before the item can
+    /// reach readyToPlay, so the criteria pass never selects the rendition in the first place (iOS device:
+    /// cues flashed for up to ~0.5 s at start when the flag was only flipped inside the async loop, which
+    /// begins around readyToPlay). The loop then re-asserts `select(nil)` as a safety net against anything
+    /// that slipped a selection in. A manual deselect sticks (device-confirmed: the PiP round-trip
+    /// workaround, which ends in exactly this deselect, cleared the subtitle). Bails the instant the host
+    /// requests a native track (`setNativeSubtitleRendering` / PiP, AirPlay, or external-display entry sets
+    /// `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
     /// when native subtitles are not prepared (no legible group, e.g. tvOS overlay-only).
     func forceNativeLegibleDeselectedUntilHostSelects() {
         guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
+        currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
         Task { @MainActor [weak self] in
             guard let self,
                   let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
