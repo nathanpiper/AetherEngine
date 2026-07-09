@@ -483,28 +483,43 @@ extension AetherEngine {
         }
 
         // Re-sample the live playhead after the slow open + prewarm: startAt was captured pre-open, and unpaused playback may have advanced several seconds, causing the first cues to arrive behind the playhead (tens-of-seconds delay in issue #52). The forward catch-up only seeks forward, never behind the anchor, and is suppressed while a recovery seek is pending: during a wedge the clock is frozen stale-AHEAD of the real backward target and would otherwise anchor the reader past the producer's landing (#96, see effectiveSubtitleStart).
-        let (freshPlayhead, recoveryPending, engineSourceDuration): (Double?, Bool, Double) = await MainActor.run { [weak self] in
+        // Round 10: the byte estimate subtracts the file's own start origin demuxer-side, so the backup duration
+        // is the plain display duration; the former `+ sourcePresentationOrigin` stretch double-compensated.
+        let (freshPlayhead, recoveryPending, engineDisplayDuration): (Double?, Bool, Double) = await MainActor.run { [weak self] in
             guard let self else { return (nil, false, 0) }
-            return (self.sourceTime, self.pendingRecoverySeekClockTarget != nil,
-                    self.duration + self.sourcePresentationOrigin)
+            return (self.sourceTime, self.pendingRecoverySeekClockTarget != nil, self.duration)
         }
         let effectiveStart = Self.effectiveSubtitleStart(
             startAt: startAt, playhead: freshPlayhead, recoveryPending: recoveryPending)
 
-        // #112 round 8: positioning seeks are bounded, with a single-probe byte-estimate fallback when the
-        // timestamp seek times out or fails. On an index-less remote MPEG-TS avformat_seek_file binary-searches
-        // via read_timestamp: dozens of range reads, each able to ride a starved connection's timeout while the
+        // #112 round 8/10: positioning seeks are bounded, with a byte-estimate fallback when the timestamp seek
+        // times out or fails. On an index-less remote MPEG-TS avformat_seek_file binary-searches via
+        // read_timestamp: dozens of range reads, each able to ride a starved connection's timeout while the
         // video pipeline owns the origin. One reader sat in this seek for minutes (never reaching "started") and
-        // every later re-arm queued behind it. The fallback lands deliberately early; the read loop walks forward
-        // and the reconstruction gate absorbs an early landing. The side demuxer's own duration is unset on those
-        // sources ("no PTS found at end of file"), so the engine's source-axis duration backs it up.
-        let knownDuration = demuxer.duration > 0 ? demuxer.duration : engineSourceDuration
+        // every later re-arm queued behind it. The fallback maps the target onto the byte axis file-relatively
+        // (round 10: the absolute source PTS overshot a Blu-ray title's 600 s origin by minutes), verifies the
+        // landing and corrects it, and lands deliberately early; the read loop walks forward and the
+        // reconstruction gate absorbs the early landing. The first timed-out/failed timestamp seek condemns the
+        // mechanism for this demuxer (round 10), so re-arms on a reused side demuxer skip straight to the
+        // estimate instead of paying the seek budget every time. The side demuxer's own duration is unset on
+        // those sources ("no PTS found at end of file"), so the engine's display duration backs it up.
+        let knownDuration = demuxer.duration > 0 ? demuxer.duration : engineDisplayDuration
         func positionSeek(_ target: Double) {
-            if !demuxer.seekBounded(to: target, timeout: AetherEngine.sideReaderSeekBudgetSeconds) {
-                let fellBack = demuxer.seekByteEstimate(to: target, knownDuration: knownDuration)
+            let timestampSeekWorked: Bool
+            if demuxer.timestampSeekUnreliable {
+                timestampSeekWorked = false
+            } else {
+                timestampSeekWorked = demuxer.seekBounded(
+                    to: target, timeout: AetherEngine.sideReaderSeekBudgetSeconds)
+                if !timestampSeekWorked { demuxer.markTimestampSeekUnreliable() }
+            }
+            if !timestampSeekWorked {
+                let fellBack = demuxer.seekByteEstimate(
+                    to: target, knownDuration: knownDuration,
+                    timeout: AetherEngine.sideReaderSeekBudgetSeconds)
                 EngineLog.emit(
-                    "[AetherEngine] embedded subtitle seek to \(String(format: "%.2f", target))s timed out or "
-                    + "failed; byte-estimate fallback \(fellBack ? "applied" : "unavailable")",
+                    "[AetherEngine] embedded subtitle seek to \(String(format: "%.2f", target))s skipped or "
+                    + "timed out; byte-estimate fallback \(fellBack ? "applied" : "unavailable")",
                     category: .engine)
             }
         }
@@ -1300,9 +1315,11 @@ extension AetherEngine {
         }
 
         // Prewarm MKV cue index (lives at EOF), same as the inline reader. Skip for disc sources (#76).
+        // #112 round 10: bounded like the inline reader's; on an index-less remote source the unbounded
+        // timestamp seek is the same minutes-long wedge the embedded path had.
         let duration = demuxer.duration
         if duration > 0, !demuxer.isDiscSource {
-            demuxer.seek(to: duration * 0.5)
+            demuxer.seekBounded(to: duration * 0.5, timeout: Self.sideReaderSeekBudgetSeconds)
         }
         let freshPlayhead = await MainActor.run { [weak self] in self?.sourceTime }
         // Sodalite#32: a whole-program read must start at `startAt` (0) regardless of the playhead; the usual
@@ -1313,7 +1330,20 @@ extension AetherEngine {
             guard let self, !Task.isCancelled else { return }
             self.nativeSubtitleReaderCoverageStart = seekTo
         }
-        demuxer.seek(to: seekTo)
+        // #112 round 10: same bounded positioning + verified byte-estimate fallback as the embedded reader
+        // (memory rule: both side readers share every positioning fix). A whole-program read (readToEOF)
+        // starts at 0 and needs no fallback.
+        if !demuxer.seekBounded(to: seekTo, timeout: Self.sideReaderSeekBudgetSeconds) {
+            demuxer.markTimestampSeekUnreliable()
+            let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
+            let fellBack = demuxer.seekByteEstimate(
+                to: seekTo, knownDuration: duration > 0 ? duration : engineDisplayDuration,
+                timeout: Self.sideReaderSeekBudgetSeconds)
+            EngineLog.emit(
+                "[AetherEngine] native subtitle readers seek to \(String(format: "%.2f", seekTo))s timed out "
+                + "or failed; byte-estimate fallback \(fellBack ? "applied" : "unavailable")",
+                category: .engine)
+        }
 
         // A decoder that fails to open is skipped (track gets no cues).
         var routes: [Int32: (decoder: EmbeddedSubtitleDecoder, store: NativeSubtitleCueStore, tb: AVRational)] = [:]

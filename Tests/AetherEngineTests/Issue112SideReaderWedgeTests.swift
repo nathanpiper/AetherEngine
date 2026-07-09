@@ -42,10 +42,10 @@ struct Issue112SideReaderWedgeTests {
 
     @Test("byte-estimate target is proportional with the early bias applied")
     func byteEstimateProportionalWithBias() {
-        // 1000 bytes over 100 s, target 50 s, 5% early bias: fraction 0.45.
-        #expect(Demuxer.byteEstimateTarget(fileSize: 1000, duration: 100, target: 50) == 450)
+        // 1000 bytes over 100 s, target 50 s, 5 s early bias: fraction 0.45.
+        #expect(Demuxer.byteEstimateTarget(fileSize: 1000, duration: 100, target: 50, earlyBiasSeconds: 5) == 450)
         // Bias-free check of the raw proportion.
-        #expect(Demuxer.byteEstimateTarget(fileSize: 1000, duration: 100, target: 50, earlyBias: 0) == 500)
+        #expect(Demuxer.byteEstimateTarget(fileSize: 1000, duration: 100, target: 50, earlyBiasSeconds: 0) == 500)
     }
 
     @Test("byte-estimate target clamps at the file edges")
