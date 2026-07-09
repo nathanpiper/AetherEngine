@@ -106,9 +106,9 @@ Plays a source through the audio-only pipeline (default ten seconds, `--seconds 
 
 ## audiotap
 
-    aetherctl audiotap [--duration S] [--out PATH.wav] <url>
+    aetherctl audiotap [--duration S] [--out PATH.wav] [--remote] <url>
 
-Brings up the loopback session headless, decodes the audio tap (#95) as fast as segments are produced, writes mono Float32 48 kHz WAV (default `/tmp/audiotap.wav`), and prints buffer count, PCM seconds, discontinuity count, and the covered `sourceTime` span. A clean run reports exactly one discontinuity (the install itself). Verification tool for the PCM audio tap across the stream-copy and bridge audio paths.
+Brings up the loopback session headless, decodes the audio tap (#95) as fast as segments are produced, writes mono Float32 48 kHz WAV (default `/tmp/audiotap.wav`), and prints buffer count, PCM seconds, discontinuity count, and the covered `sourceTime` span. A clean run reports exactly one discontinuity (the install itself). `--remote` drives the remote-HLS delivery path instead (direct AVPlayer ingest of an HLS url, no loopback): rendition/variant resolution, segment fetch + decrypt, playhead-follow decode. Verification tool for the PCM audio tap across the stream-copy and bridge audio paths.
 
 ## bgaudio
 

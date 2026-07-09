@@ -8,7 +8,7 @@ AetherEngine has three playback pipelines, picked once at `load(url:)`: the audi
 
 ### Native AVPlayer pipeline (default)
 
-Demux the source with libavformat, re-mux the elementary streams on the fly into HLS-fMP4, serve them from a local HTTP server on `127.0.0.1:<port>`, point `AVPlayer` at the playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, all audio routing. This is the path for HEVC and H.264, which is what AVPlayer's HLS-fMP4 pipeline reliably accepts. Atmos passthrough, DV HDMI handshake, HDR10 / HDR10+ system-side tone-mapping all live on this path.
+Demux the source with libavformat, re-mux the elementary streams on the fly into HLS-fMP4, serve them from a local HTTP server on `127.0.0.1:<port>`, point `AVPlayer` at the playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, all audio routing. This is the path for HEVC and progressive H.264, which is what AVPlayer's HLS-fMP4 pipeline reliably accepts (interlaced H.264 routes to the software path for deinterlacing, #107). Atmos passthrough, DV HDMI handshake, HDR10 / HDR10+ system-side tone-mapping all live on this path.
 
 ```
 Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache ──► HLSLocalServer
@@ -36,7 +36,7 @@ When a restart does run, it must reproduce segments on the SAME media timeline t
 
 ### Software decoder pipeline (AV1 + VP9 + VP8 + legacy fallback)
 
-Demux the source, run video packets through libavcodec (dav1d for AV1, FFmpeg's native decoder for VP9 / VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1) into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used for codecs AVPlayer's HLS-fMP4 pipeline doesn't accept: AV1 (no Apple TV currently ships an AV1 hardware decoder, and Apple bundles dav1d only on iOS / macOS, so AV1 always routes here today; the engine still registers the supplemental VideoToolbox AV1 decoder and gates on `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`), so a future Apple TV chip with HW AV1 is picked up automatically), VP9 / VP8 (AVPlayer parses the HLS manifest, sees `vp09` / `vp08` in the CODECS attribute, then silently stops fetching. `item.status` never leaves `.unknown`. VideoToolbox HW-decodes VP9 fine, but only outside the HLS pipeline), and legacy MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1 (none of `mp4v.20.X` / `mp2v` / `vc-1` are in Apple's HLS Authoring Spec CODECS list).
+Demux the source, run video packets through libavcodec (dav1d for AV1, FFmpeg's native decoder for VP9 / VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1) into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used for codecs AVPlayer's HLS-fMP4 pipeline doesn't accept: AV1 (no Apple TV currently ships an AV1 hardware decoder, and Apple bundles dav1d only on iOS / macOS, so AV1 always routes here today; the engine still registers the supplemental VideoToolbox AV1 decoder and gates on `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`), so a future Apple TV chip with HW AV1 is picked up automatically), VP9 / VP8 (AVPlayer parses the HLS manifest, sees `vp09` / `vp08` in the CODECS attribute, then silently stops fetching. `item.status` never leaves `.unknown`. VideoToolbox HW-decodes VP9 fine, but only outside the HLS pipeline), and legacy MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1 (none of `mp4v.20.X` / `mp2v` / `vc-1` are in Apple's HLS Authoring Spec CODECS list). Interlaced H.264 also routes here (`VideoRoutingPolicy`, keyed on the declared field order), because AVPlayer does not deinterlace and 1080i / 576i broadcast would comb; the SW path runs it through `DeinterlaceFilter` (#107).
 
 ```
 Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──► SampleBufferRenderer
@@ -74,7 +74,7 @@ On tvOS and iOS the AVPlayer audio host owns a persistent per-player `MPNowPlayi
 
 `installAudioTap()` returns an `AsyncStream<AudioTapBuffer>` of decoded playback audio: mono Float32 48 kHz (`AetherEngine.audioTapFormat`), stamped with source-PTS seconds (`sourceTime`, same axis as `engine.sourceTime`), with a `discontinuity` flag on any gap (seek, eviction, track switch, drops under pressure). Intended for host-side speech features (live transcription via SpeechAnalyzer) and audio recognition (ShazamKit signatures).
 
-Native path: a loopback reader (`LoopbackAudioReader`) pulls the engine's own muxed fMP4 segments from the segment cache near the playhead and decodes their audio track out-of-band (libavcodec + libswresample, fresh per-segment demux context). Because it reads the mux, it follows the active audio track for free (the mux contains exactly the selected track, post-bridge), adds zero network load, and cannot stall playback by construction. Software path: the existing `AudioDecoder` PCM output is mirrored through an `AVAudioConverter` sink on `SoftwarePlaybackHost`. One tap per engine; re-install replaces the previous stream, and `load()` / `stop()` finish it (opt-in is per load; with no session or a video-only source the stream finishes immediately). Delivery is lossy under pressure (`bufferingNewest(64)`); live sources are best-effort.
+Native path: a loopback reader (`LoopbackAudioReader`) pulls the engine's own muxed fMP4 segments from the segment cache near the playhead and decodes their audio track out-of-band (libavcodec + libswresample, fresh per-segment demux context). Because it reads the mux, it follows the active audio track for free (the mux contains exactly the selected track, post-bridge), adds zero network load, and cannot stall playback by construction. Remote-HLS path (direct AVPlayer ingest, no loopback, VOD and live): `AudioTapHLSVariantResolver` picks the active audio rendition / muxed variant, `AudioTapHLSFetcher` fetches and decrypts (AES-128 clear-key) self-contained TS / fMP4 segments, and a playhead-follow reader (`AudioTapHLSReader`) decodes them near the playhead; `AudioTapReaderSelection` makes the per-session reader choice, and `audioTapHasDeliverySource` tells the host whether the current session can deliver at all (fail-loud). Software path: the existing `AudioDecoder` PCM output is mirrored through an `AVAudioConverter` sink on `SoftwarePlaybackHost`. One tap per engine; re-install replaces the previous stream, and `load()` / `stop()` finish it (opt-in is per load; with no session or a video-only source the stream finishes immediately). Delivery is lossy under pressure (`bufferingNewest(64)`); live sources are best-effort.
 
 ```
 native ──► SegmentCache (init + seg N) ──► mov demux ──► libavcodec ──► swr (mono 48k) ──► AsyncStream
@@ -129,7 +129,7 @@ Sources/AetherEngine/
 ├── AetherEngine+ClosedCaptions.swift        In-band CEA-608 closed captions: ClosedCaptionTap (read-only producer observer) + cue mirroring (#77)
 ├── AetherEngine+Live.swift                  Live window publishing, edge snap, resume clamp, scrub thumbnails
 ├── AetherEngine+Diagnostics.swift           Memory probe + live-telemetry bridge
-├── AetherEngine+AudioTap.swift              Opt-in decoded PCM audio tap (#95): installAudioTap() vends the AsyncStream, dispatches native-loopback vs SW-mirror
+├── AetherEngine+AudioTap.swift              Opt-in decoded PCM audio tap (#95): installAudioTap() vends the AsyncStream, dispatches native-loopback vs remote-HLS vs SW-mirror
 ├── AetherEngine+BackgroundAudioTestHooks.swift DEBUG-only hooks letting aetherctl bgaudio toggle the SW background-audio keepalive without a UIApplication lifecycle (never shipped)
 ├── PlaybackClock.swift                      engine.clock: the ~10 Hz ticking values (currentTime, sourceTime, bufferedPosition, progress, live-edge fields) as a separate ObservableObject
 ├── PlayerState.swift                        PlaybackState, PlaybackPhase, VideoFormat, PlaybackBackend, LoadOptions, SourceProbe, TrackInfo, FontAttachment, MediaMetadata, SubtitleCue, SubtitleImage
@@ -148,12 +148,17 @@ Sources/AetherEngine/
 │       ├── AudioTapDecoder.swift            FFmpeg decode of tap packets into mono Float32 48 kHz AVAudioPCMBuffers (lazy resampler, own lock discipline)
 │       ├── AudioTapPCMConverter.swift       SW path: AVAudioConverter sink mirroring AudioDecoder PCM into the tap's mono 48 kHz format
 │       ├── AudioTapTypes.swift              AudioTapBuffer value type (single-consumer @unchecked Sendable) + pure loopback pacing decision
+│       ├── AudioTapHLSVariantResolver.swift Remote-HLS tap: resolves the active audio rendition / muxed variant from the master playlist (#95)
+│       ├── AudioTapHLSFetcher.swift         Remote-HLS tap: segment fetch + AES-128 clear-key decrypt for self-contained TS / fMP4 segments (#95)
+│       ├── AudioTapHLSReader.swift          Remote-HLS tap worker: playhead-follow reader decoding fetched segments (VOD + live) (#95)
+│       ├── AudioTapReaderSelection.swift    Pure per-session reader choice (loopback vs remote-HLS vs none) backing audioTapHasDeliverySource (#95)
 │       └── LoopbackAudioReader.swift        Native-path tap worker: pulls fMP4 segments from SegmentCache near the playhead, decodes their audio out-of-band on a utility thread (cannot stall playback)
 ├── Decoder/
 │   ├── CCDataParser.swift                   Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77)
 │   ├── CEA608Decoder.swift                  In-house CEA-608 line-21 decoder (field-1 / CC1), validated against FFmpeg ccaption_dec.c (#77)
 │   ├── DeinterlaceFilter.swift              SW path: persistent bwdif / yadif libavfilter graph, engages on the first interlaced frame
-│   ├── EmbeddedSubtitleDecoder.swift        Inline subtitle decode from demuxed packets
+│   ├── EmbeddedSubtitleDecoder.swift        Inline subtitle decode from demuxed packets; opens DVB teletext with libzvbi_teletextdec text-format options (#107)
+│   ├── VideoRoutingPolicy.swift             Pure codec-and-field-order dispatch rule: AV1 gated on HW, VP9/VP8/MPEG4/MPEG2/VC1 always SW, interlaced H.264 SW so bwdif can deinterlace (#107)
 │   ├── HardwareVideoDecoder.swift           SW path: VideoToolbox HW HEVC / AV1 decoder for sources routed away from AVPlayer
 │   ├── SoftwareVideoDecoder.swift           SW path: libavcodec/dav1d → CVPixelBuffer (NV12 / P010), HDR10+ side data
 │   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only)
@@ -251,7 +256,7 @@ Sources/AetherEngine/
 │   ├── FragmentSplitter.swift               Native path: routes mp4 muxer's avio output stream into init.mp4 (ftyp+moov) vs per-segment moof+mdat files
 │   ├── PacketRingBuffer.swift               Live path: keyframe-indexed, disk-spooled packet ring backing the SW-path DVR rewind
 │   ├── SegmentCache.swift                   Native path: producer/consumer segment store with backpressure, scrub-aware eviction + byte-budgeted VOD backward retention (restart-free back-seeks)
-│   └── VTCapabilityProbe.swift              AV1 system-decode probe (gates codec routing; VP9 / VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1 always route SW)
+│   └── VTCapabilityProbe.swift              AV1 system-decode probe (gates codec routing; VP9 / VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1 and interlaced H.264 always route SW, see VideoRoutingPolicy)
 └── View/
     └── AetherPlayerView.swift               Polymorphic surface: hosts either AVPlayerLayer (native) or AVSampleBufferDisplayLayer (SW)
 ```
@@ -273,7 +278,7 @@ The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [d
 
 | Package | License | Purpose |
 | --- | --- | --- |
-| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0 | Slim FFmpeg 8.1 (avcodec / avformat / avutil / swresample / swscale / avfilter + zimg) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010. avfilter ships a trimmed filter set: zscale + tonemap + colorspace (HDR → SDR still extraction), bwdif + yadif (SW-path deinterlacing) |
+| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0 | Slim FFmpeg 8.1 (avcodec / avformat / avutil / swresample / swscale / avfilter + zimg) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010. avfilter ships a trimmed filter set: zscale + tonemap + colorspace (HDR → SDR still extraction), bwdif + yadif (SW-path deinterlacing). Bundles libzvbi for the DVB teletext decoder (#107) |
 | [LibDovi](https://github.com/superuser404notfound/LibDovi) | MIT / Apache-2.0 | libdovi (the `dolby_vision` crate's C API) for live Dolby Vision Profile 7 to single-layer 8.1 RPU conversion (`dovi_convert_rpu_with_mode`, mode 2), so the Apple TV engages real DV on dual-layer UHD-BD remuxes instead of plain HDR10. Prebuilt xcframework, no Rust at the consumer's build time |
 | [SMBClient](https://github.com/kishikawakatsumi/SMBClient) | MIT | Pure-Swift SMB2 client over `NWConnection`, backing the opt-in `AetherEngineSMB` product only (never linked by the core engine). NTLMv2 / guest, SMB 2.0.2 / 2.1. Replaced AMSMB2/libsmb2, which `EPERM`s on tvOS / iOS |
 | VideoToolbox | System | Native path video decode (HW where available, Apple's bundled SW dav1d on iOS / macOS) |

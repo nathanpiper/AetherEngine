@@ -6,15 +6,16 @@ Depth behind the README's "What it handles" matrix: codec routing, HDR signaling
 
 **Containers (demux side):** MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV.
 
-**Hardware decode** (native AVPlayer path, VideoToolbox): H.264, HEVC, HEVC Main10. AV1 on devices with HW AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips) also routes natively.
+**Hardware decode** (native AVPlayer path, VideoToolbox): H.264 (progressive), HEVC, HEVC Main10. AV1 on devices with HW AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips) also routes natively.
 
 **Software decode** (`SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`):
 
 - AV1 (libavcodec / dav1d) on devices without HW AV1 (currently all Apple TVs, M1 / M2 Macs, pre-A17-Pro iPhones).
 - VP9 and VP8 (libavcodec native) unconditionally, since AVPlayer's HLS pipeline rejects the `vp09` / `vp08` CODECS attributes even where VideoToolbox can HW-decode them.
 - MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1, none of which AVPlayer's HLS-fMP4 pipeline accepts; libavcodec ships native decoders for all three.
+- Interlaced H.264 (declared field order TT / BB / TB / BT), so the deinterlacer below can run; tvOS AVPlayer does not deinterlace, so 1080i / 576i broadcast combs on the native path (#107).
 
-Interlaced sources (DVD-rip MPEG-2, SD broadcast) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load`, gated per source on `VTCapabilityProbe` and codec id.
+Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`), gated per source on `VTCapabilityProbe`, codec id, and declared field order.
 
 ## HDR routing
 
@@ -78,10 +79,10 @@ Matroska CodecPrivate doesn't usually carry the pre-parsed `dec3` / `dac3` box c
 
 Subtitle cues come from one read: EVERY embedded subtitle stream (text and bitmap) stays in the session demuxer's keep-set and is harvested by a tap on the host's existing source read (each packet is observed then dropped, never muxed). Harvested packets are retained compressed in a per-session `SubtitlePacketStore` (300 s trailing window, byte-capped per stream) and a playhead-paced drainer decodes the selected stream near the playhead into the overlay, so enabling any embedded track costs no second connection, no positioning seek, and no recovery machinery, even on remote disc images; the tap re-attaches with the producer across seeks and restarts. Sidecars are fetched once. Each packet decodes through `avcodec_decode_subtitle2` (except in-band CEA-608, which has an in-house line-21 decoder, see below), and the result lands in a single `[SubtitleCue]` published list:
 
-- **Text codecs** (SubRip / ASS / SSA / WebVTT / mov_text) → `SubtitleCue.body = .text(String)`. ASS dialogue headers and override blocks (`{\an8}`, `{\b1}`, ...) are stripped; `\N` becomes a real newline so the host can render with regular text layout.
-- **Bitmap codecs** (PGS / HDMV PGS / DVB / DVD) → `.image(SubtitleImage)`. The indexed pixel plane is walked through its palette, premultiplied against alpha, and wrapped as a `CGImage`. Position is normalised in `[0..1]` against the source video frame so the host scales to any on-screen rect.
+- **Text codecs** (SubRip / ASS / SSA / WebVTT / mov_text) → `SubtitleCue.body = .text(String)`. ASS dialogue headers and override blocks (`{\an8}`, `{\b1}`, ...) are stripped; `\N` becomes a real newline so the host can render with regular text layout. DVB teletext subtitles (live broadcast) decode through libzvbi (`libzvbi_teletextdec`, configured to emit text rather than a teletext bitmap) onto the same text-cue path (#107).
+- **Bitmap codecs** (PGS / HDMV PGS / DVB / DVD) → `.image(SubtitleImage)`. The indexed pixel plane is walked through its palette, premultiplied against alpha, and wrapped as a `CGImage`. Position is normalised in `[0..1]` against the composition canvas, whose coded pixel size rides along as `SubtitleImage.canvasSize` (#112): a cropped-video rip can author a canvas taller than the coded video, so hosts map the canvas width-aligned and center-anchored onto the on-screen video rect to land cues where the disc authored them; `.zero` means treat canvas == video.
 - **External files** (a separate `.srt` / `.ass` / `.vtt` URL) → register as first-class tracks (see below) or one-shot via `selectSidecarSubtitle(url:httpHeaders:)`, which opens its own short-lived `AVFormatContext`, decodes the whole file once, atomically swaps the result into `subtitleCues`. The fetch forwards the session's `LoadOptions.httpHeaders` by default (WebDAV auth and friends); pass the call's own `httpHeaders` to override per fetch.
-- **In-band CEA-608 closed captions** (`eia_608` / QuickTime `c608`, a demuxable caption track) → `.text(String)`. FFmpegBuild ships no `ccaption` decoder, so these never reach `avcodec_decode_subtitle2` (the side-demuxer open fails and the track sits active-but-blank). Instead a read-only tap on the segment producer's existing source connection reads the caption track's `cc_data` (its packets are kept in the demuxer's keep-set, observed, then dropped, never muxed, so the loopback-HLS output stays byte-identical), an in-house line-21 decoder (validated against FFmpeg's `ccaption_dec.c`) turns it into cues, and they publish on the same `subtitleCues` overlay path as every other codec. First cut: field-1 / channel CC1; CEA-708 (DTVCC) and field 2 are follow-ons. Captions carried only in the H.264 SEI with no separate track are out of scope. Host-overlay only (no PiP / AirPlay), like the bitmap codecs. (#77)
+- **In-band CEA-608 closed captions** (`eia_608` / QuickTime `c608`, a demuxable caption track) → `.text(String)`. FFmpegBuild ships no `ccaption` decoder, so these never reach `avcodec_decode_subtitle2`. Instead a read-only tap on the segment producer's existing source connection reads the caption track's `cc_data` (its packets are kept in the demuxer's keep-set, observed, then dropped, never muxed, so the loopback-HLS output stays byte-identical), an in-house line-21 decoder (validated against FFmpeg's `ccaption_dec.c`) turns it into cues, and they publish on the same `subtitleCues` overlay path as every other codec. First cut: field-1 / channel CC1; CEA-708 (DTVCC) and field 2 are follow-ons. Captions carried only in the H.264 SEI with no separate track are out of scope. Host-overlay only (no PiP / AirPlay), like the bitmap codecs. (#77)
 
 ### External subtitle files as first-class tracks
 
@@ -116,7 +117,7 @@ Host-rendered subtitle overlays are invisible in Picture-in-Picture, AirPlay, an
 
 **Opt-in.** Off by default (`LoadOptions.prepareNativeSubtitles = false`): no renditions in the master, no legible menu, output identical to before.
 
-**Cue source: the producer pump tap.** The segment producer already reads the source's full interleave, so the text subtitle streams stay in its keep-set and every packet is handed to a session-level tap that decodes into per-track cue stores (the same pattern as the CEA-608 tap). Zero side-channel bandwidth, and coverage is by construction the produced region, across seeks and producer restarts. The host overlay for embedded text tracks is fed from the same stores (selection backfills instantly, live cues follow); a lazy per-selection reader still covers AVKit's ~240 s forward `.vtt` prefetch beyond the produced region. Load-declared external tracks (#88) have no demuxable stream to tap; their store is filled by one whole-file decode at load and marked finished, so their rendition serves complete `.vtt` files from the start.
+**Cue source: the producer pump tap.** The segment producer already reads the source's full interleave, so the text subtitle streams stay in its keep-set and every packet is handed to a session-level tap that decodes into per-track cue stores (the same pattern as the CEA-608 tap). Zero side-channel bandwidth, and coverage is by construction the produced region, across seeks and producer restarts. The host overlay is fed separately, by the packet-store drainer (#112 rework, see [Subtitles](#subtitles) above); a lazy per-selection reader still covers AVKit's ~240 s forward `.vtt` prefetch beyond the produced region. Load-declared external tracks (#88) have no demuxable stream to tap; their store is filled by one whole-file decode at load and marked finished, so their rendition serves complete `.vtt` files from the start.
 
 **Routing scope.** A `SUBTITLES` rendition can only live in a master playlist, so native subtitles ride the master-routing rules: SDR sources on any panel, HDR / DV sources on HDR-ready panels. HDR-on-SDR-panel and DV Profile 5 on non-DV panels stay media-direct (no master, hence no native subtitles there); the host overlay still covers fullscreen. Bitmap subtitles (PGS / DVB / DVD) cannot become text renditions and stay host-rendered only. Live sources are out of scope.
 
@@ -128,11 +129,16 @@ Host-rendered subtitle overlays are invisible in Picture-in-Picture, AirPlay, an
 
 **Selection: deliberately not automatic.** The renditions ship `DEFAULT=NO,AUTOSELECT=NO` so AVKit never engages one on its own and a host overlay never double-renders in fullscreen. A host that shows AVKit's stock chrome can still let the user pick from the native legible menu; Sodalite-style hosts select programmatically per surface instead.
 
-**Selection: host-driven API.** Three members on `AetherEngine` drive the native renditions programmatically:
+**Selection: host-driven API.** These members on `AetherEngine` drive the native renditions programmatically:
 
 ```swift
 // true once cues from at least one text track are decoded into the native stores
 engine.$nativeSubtitleRenditionAvailable   // @Published var Bool
+
+// true while the loopback session serves a master carrying the SUBTITLES group;
+// goes false on a media-playlist fallback. Hosts use it to decide whether to draw
+// their own subtitle window on a wired external display instead (#98)
+engine.$nativeSubtitleRenditionsServed     // @Published var Bool
 
 // ordered list of all native subtitle renditions (ordinal, language tag, display name)
 engine.$nativeSubtitleTracks               // @Published var [NativeSubtitleTrack]
@@ -140,6 +146,10 @@ engine.$nativeSubtitleTracks               // @Published var [NativeSubtitleTrac
 // select a rendition by ordinal (nil deselects); language-tag match, positional fallback.
 // Re-asserts automatically if AVFoundation drops the selection during a stall recovery.
 engine.setNativeSubtitleSelected(track ordinal: Int?)
+
+// convenience for the enter/leave pattern below: true resolves the rendition matching the
+// currently-active overlay track and selects it, false deselects
+engine.setNativeSubtitleRendering(_ active: Bool)
 ```
 
 `NativeSubtitleTrack` carries `.ordinal` (position in the rendition declaration), `.language` (ISO 639-2 tag), and `.displayName` (localized name suitable for a picker label).
@@ -147,8 +157,8 @@ engine.setNativeSubtitleSelected(track ordinal: Int?)
 The recommended host pattern for PiP / AirPlay:
 
 1. Observe `$nativeSubtitleRenditionAvailable` (waits for the first cues to be ready before activating).
-2. On entering PiP / AirPlay / external display: call `setNativeSubtitleSelected(track: ordinal)` with the ordinal that matches the currently active inline track, and hide the host overlay.
-3. On leaving: call `setNativeSubtitleSelected(track: nil)` and re-enable the host overlay.
+2. On entering PiP / AirPlay / external display: call `setNativeSubtitleRendering(true)` (or resolve the ordinal yourself via `setNativeSubtitleSelected(track:)`), and hide the host overlay.
+3. On leaving: call `setNativeSubtitleRendering(false)` and re-enable the host overlay.
 
 This avoids double subtitles during inline playback (where the host overlay is already painting them) and ensures the user sees subtitles the moment the stream is mirrored or sent to PiP.
 
