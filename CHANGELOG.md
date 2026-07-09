@@ -41,7 +41,7 @@ the public-API contract.
 - **Scrub clock held through a wedged-restart recovery (#37 resurface, #93).**
 - **Resolved content lengths shared across demuxer opens (#112).** `SourceContentLengthCache` lets an open whose size probe was starved under concurrent load (or 429'd) reuse an already-resolved length for the same origin and stay byte-seekable; a genuinely length-less source never populates the cache.
 - **Synthetic PGS END flush gated on a complete object (#112),** clearing the "Invalid object id 0" decode noise on split m2ts.
-- **Native legible renditions (Sodalite#38).** Host-managed native renditions never emit `FORCED=YES`, and the native legible selection stays deselected in fullscreen until the host explicitly selects it.
+- **Native legible renditions (Sodalite#38).** Host-managed native renditions never emit `FORCED=YES`, and the native legible selection stays deselected in fullscreen until the host explicitly selects it. The deselect is pinned unconditionally the moment the legible group loads and re-asserted on a 40 ms cadence for the first second, so a system caption preference no longer flashes cues for up to ~0.5 s at video start on iOS.
 - **Wired HDMI external display keeps loopback + master (Sodalite#34).**
 
 ## [4.12.1] - 2026-07-05
