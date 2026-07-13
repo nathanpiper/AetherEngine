@@ -586,6 +586,13 @@ final class NativeAVPlayerHost {
     /// scrub paused instead of forcing `.playing`.
     var transportIntentIsPlaying: Bool { playIntent }
 
+    /// #123: true while AVPlayer is still buffering toward a seek target (`waitingToPlayAtSpecifiedRate`)
+    /// rather than presenting a frame. A paused or playing status is presenting the on-screen frame at
+    /// the current position (a paused scrub shows the seeked frame); only `waitingToPlay` has the
+    /// picture frozen BEHIND the target while it fills. The seek finalize / landing use this to avoid
+    /// stamping `sourceTime`/`renderedTime` to a target the picture has not reached yet (#123).
+    var isBufferingTowardSeekTarget: Bool { avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate }
+
     /// End of the last seekable time range (seconds); tracks the live edge for EVENT playlists.
     var seekableEnd: Double {
         guard let r = avPlayer.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return 0 }
@@ -666,8 +673,18 @@ final class NativeAVPlayerHost {
                         let landed = self.avPlayer.currentTime().seconds
                         if landed.isFinite {
                             self.currentTime = landed
-                            // Also settle renderedTime so sourceTime settles immediately (#49).
-                            self.renderedTime = landed
+                            // #49: settle renderedTime so sourceTime settles immediately, BUT only when the
+                            // landed frame is actually presented (playing or paused shows the target frame).
+                            // #123: while still buffering toward the target (`waitingToPlayAtSpecifiedRate`)
+                            // the picture is frozen behind it and `landed` is the target the player accepted,
+                            // not the on-screen frame; stamping it parks renderedTime (and thus sourceTime)
+                            // ahead of the picture for the whole chase, because the 100ms periodic observer is
+                            // silent while waiting and cannot walk it back. Hold renderedTime on the frozen
+                            // frame; the observer settles it to the target when playback resumes.
+                            if AetherEngine.seekLandingSettlesToTarget(
+                                bufferingTowardTarget: self.isBufferingTowardSeekTarget) {
+                                self.renderedTime = landed
+                            }
                         }
                     }
                     if resumeGuard.claim() { cont.resume(returning: true) }

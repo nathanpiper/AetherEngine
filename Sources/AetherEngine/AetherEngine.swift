@@ -1056,6 +1056,22 @@ public final class AetherEngine: ObservableObject {
         transportIntentIsPlaying ? .playing : .paused
     }
 
+    /// #123: whether a seek landing (host completion + engine finalize) may settle `sourceTime` /
+    /// `renderedTime` onto the seek target. `sourceTime` is the on-screen frame (#49), not the scrub
+    /// target. When the landed frame is presented (the player is playing or paused at the position)
+    /// the target IS the on-screen frame, so settle onto it. While the player is still buffering
+    /// toward the target (`waitingToPlayAtSpecifiedRate`, a queued-burst chase on heavy 4K) the
+    /// picture is frozen behind the target: settling would park `sourceTime` up to tens of seconds
+    /// ahead of the frame for the whole chase, because the 100 ms periodic observer is silent while
+    /// buffering and cannot walk it back, so any host pacing cues off `sourceTime` renders them over a
+    /// stale frame (rrgomes' report). Hold instead; the observer settles `sourceTime` onto the target
+    /// when playback resumes and the frame is delivered. This also keeps `abs(currentTime - sourceTime)`
+    /// honest as a "converging" gap hosts can gate cue rendering on, instead of collapsing it at every
+    /// landing while the picture is still behind.
+    nonisolated static func seekLandingSettlesToTarget(bufferingTowardTarget: Bool) -> Bool {
+        !bufferingTowardTarget
+    }
+
     #if DEBUG
     /// Test-only override for the session's restart-in-flight signal (#93 residual deferral tests).
     var testHookRestartInFlightOverride: Bool? = nil
@@ -2073,7 +2089,12 @@ public final class AetherEngine: ObservableObject {
         clock.currentTime = target
         // sourceTime + subtitle re-arm need true source PTS; map the display target back (0 off disc). AE#105.
         let landedSourcePTS = PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin)
-        clock.sourceTime = landedSourcePTS
+        // #123: only settle sourceTime onto the target when the landed frame is actually presented (see
+        // applySeekFinalizeSourceTime); while buffering toward it the picture is frozen behind the target,
+        // so hold sourceTime on the rendered frame and let the $renderedTime sink settle it when the frame
+        // is delivered.
+        applySeekFinalizeSourceTime(target: landedSourcePTS,
+                                    bufferingTowardTarget: nativeHost?.isBufferingTowardSeekTarget ?? false)
 
         // #100 + #96: the playhead jumped; re-anchor the overlay subtitle readers at the landed source-PTS.
         reanchorSubtitleOverlays()

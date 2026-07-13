@@ -36,6 +36,22 @@ extension AetherEngine {
         }
     }
 
+    /// #123: publish `sourceTime` at seek finalize. `sourceTime` is the on-screen frame (#49), not the
+    /// scrub target. Settle it onto the landed `target` (source PTS) only when the frame is actually
+    /// presented; while the player is still buffering toward the target (a queued-burst chase on heavy
+    /// 4K, `bufferingTowardTarget`) the picture is frozen behind it, so leave `sourceTime` on the frame
+    /// the `$renderedTime` sink last published. Stamping the target while buffering parks `sourceTime`
+    /// tens of seconds ahead of the picture for the whole chase, because the 100 ms periodic observer is
+    /// silent while waiting and cannot walk it back, so a host pacing cues off `sourceTime` draws them
+    /// over a stale frame (rrgomes' #123 report). The sink settles `sourceTime` onto the target when
+    /// playback resumes and the frame is delivered. Extracted from `seek(to:)`'s finalize so the
+    /// hold-vs-settle decision is unit-testable without driving a live AVPlayer.
+    func applySeekFinalizeSourceTime(target: Double, bufferingTowardTarget: Bool) {
+        if Self.seekLandingSettlesToTarget(bufferingTowardTarget: bufferingTowardTarget) {
+            clock.sourceTime = target
+        }
+    }
+
     /// Wire `$duration`, `$isReady`, `$failureMessage`, `$didReachEnd` into the cancellable set. Pass `isReady: nil` for paths that skip the readiness -> .paused waypoint (e.g. loadRemoteHLS).
     private func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
