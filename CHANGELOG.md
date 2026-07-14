@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.0.5] - 2026-07-14
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.5))
+
+### Added
+
+- **A host can now mount media paused with `LoadOptions.autoplay` (#124).** Every load path ended in an unconditional autostart, so a host that wanted to hold a pause at mount (a synchronized-start lobby that loads several devices and starts them together on a signal, or a hold-at-mount / resume prompt) always received one engine-initiated resume at load completion and had to claw it back with a racy state-sink clamp, the same declared-versus-real split as #122/#123. `LoadOptions.autoplay` defaults to `true`, so every current caller is byte-identical. Set it to `false` and the load skips its terminal `play()` and `state = .playing` across all paths (native VOD, software, both audio backends, and the lean native remote-HLS path), leaves `playIntent` false, and settles `.loading` to `.paused` through the existing `host.$isReady` readiness waypoint; the host resumes later with `play()`. On the native VOD path the SDR-to-HDR cold-start readiness gate is skipped for a paused mount, since it is an autostart-path recovery that plays to poll readiness. The `reloadAtCurrentPosition` path (audio switch, live rejoin) is unchanged. Thanks to rrgomes for the device traces and the code-level shape of the fix.
+
+### Fixed
+
+- **Subtitle cues no longer starve permanently after a backward seek into cache-resident content (#125).** During a long mixed-direction seek storm on a heavy 4K Dolby Vision remux with embedded PGS and SubRip tracks, subtitle cues could stop rendering partway through and never return, each track re-arm logging `backfilled 0 cues` over an armed but empty store. The #112 overlay is fed only from the session's `SubtitlePacketStore`, whose single writer is the producer demux pump, and the playhead-paced drainer pruned that store every tick at `playhead - retentionSeconds`. A backward jump into segment-cache-resident content is served without a producer restart and the pump stays parked forward, so once a forward excursion pushed the prune cutoff past the returned region its packets were gone and never re-harvested, leaving the drain window permanently empty. The trailing time-prune is removed; the store is now bounded only by its existing per-stream byte cap (evict-oldest), so text tracks keep the whole session and bitmap tracks keep a wide trailing window, matching how the segment cache retains history for backward seeks rather than clamping to a window ahead of the playhead. A backward seek past a bitmap stream's evicted edge is a deferred windowed-re-read fallback. Thanks to rrgomes for the code-level diagnosis (the pump as the store's only writer, the cache-resident backward jump that skips the restart) and the byte-retention fix direction.
+
 ## [5.0.4] - 2026-07-13
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.4))
