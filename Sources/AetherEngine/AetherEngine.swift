@@ -2682,6 +2682,23 @@ public final class AetherEngine: ObservableObject {
         }
         lifecycleObservers.append(fgObserver)
         #endif
+
+        // Diag (Sodalite device-verify 2026-07-15): playback auto-paused in a loop while another
+        // app's camera PiP held the audio session; the engine had no visibility into WHO paused.
+        // Log-only observer; handling (auto-resume on .ended, blocked-state surfacing) follows evidence.
+        let interruptionObserver = nc.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(), queue: .main
+        ) { note in
+            let info = note.userInfo ?? [:]
+            let began = (info[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
+            let options = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let reason = (info[AVAudioSessionInterruptionReasonKey] as? UInt).map(String.init) ?? "n/a"
+            let session = AVAudioSession.sharedInstance()
+            EngineLog.emit("[AetherEngine] AVAudioSession interruption \(began ? "BEGAN" : "ENDED") reason=\(reason) options=\(options) otherAudio=\(session.isOtherAudioPlaying) silenceHint=\(session.secondaryAudioShouldBeSilencedHint)", category: .engine)
+        }
+        lifecycleObservers.append(interruptionObserver)
         #endif
     }
 
