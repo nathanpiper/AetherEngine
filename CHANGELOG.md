@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-07-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.3.0))
+
+### Added
+
+- **Live audio delivery is decoupled from video decode pace (#107).** The software live (DVR) feeder fed audio interleaved behind the video renderer's back-pressure gate, capping the audio renderer's lead over the clock below one second; on devices where software 1080i decode plus deinterlacing runs near real time that margin is zero and every feeder stall was an audible dropout. An audio look-ahead pump now decodes and enqueues audio from the DVR ring up to a 4 s lead independent of the video path, so a slow video decode degrades to late video frames under smooth audio. DVR seeks reset the pump cursor atomically alongside the combined cursor.
+- **Live-edge source underruns pause and rebuffer instead of chopping forever (#107).** When the source itself briefly delivers below real time and playback drains the ring at the live edge, the free-running synchronizer clock used to outrun the stream permanently, leaving every later sample in the clock's past (continuous chopping that never recovered). The clock now pauses at 0.15 s of remaining audio lead, refills, and resumes at 2 s, mirroring AVPlayer's stall handling on the native path.
+- **`aetherctl play --audio-stats` and `--host-calls seekback`.** The play harness can now tap the decoded PCM and report per-second audio lead plus source-PTS continuity gaps, and script a DVR rewind plus live-edge return; this is the tooling the audio-chopping report was diagnosed and verified with.
+
 ## [5.2.1] - 2026-07-16
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.2.1))
