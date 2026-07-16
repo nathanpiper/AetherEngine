@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.3.1] - 2026-07-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.3.1))
+
+### Fixed
+
+- **Credential headers are no longer replayed onto cross-origin redirect targets (#126 follow-up).** The redirect handler shared by the persistent reader and both size probes reapplied every caller-supplied header, including `Authorization`, to whatever URL a redirect landed on. A media server 307-redirecting to a cross-origin presigned object-storage URL (query-string auth) then rejected the request with 400 (two conflicting auth mechanisms), every probe went blind, and the reader degraded to forward-only streaming mode, breaking moov-at-end MP4s against a fully byte-seekable target. It also disclosed the media-server token to foreign hosts. Credentials (`Authorization`, `Proxy-Authorization`, `Cookie`, Emby/Jellyfin token headers) are now replayed only to a same-host target with no TLS downgrade; `Range` and non-credential extra headers still survive cross-host redirects for header-dependent proxies (#8 behavior unchanged). Thanks to YangHanqing for the precise A/B diagnosis.
+
 ## [5.3.0] - 2026-07-16
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.3.0))
