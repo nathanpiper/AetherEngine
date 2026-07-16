@@ -10,6 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-07-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.2.0))
+
+### Added
+
+- **Teletext subtitles render on the overlay with page-state semantics (#107).** DVB teletext (libzvbi) captions now reach `subtitleCues` on every software session shape. libzvbi emits page content open-ended ("until replaced") and page erases as rect-less clear events; both now carry a text trim that closes earlier open cues at the event start, so live roll-up captions build and replace cleanly instead of accumulating. Open-ended windows are additionally capped at 120 s as a ghost-line bound. Validated end-to-end against Australian FTA broadcasts (1080i25 H.264, captions on page 801). Thanks to tresby for the tuner access that made the live validation possible.
+- **`aetherctl play`.** Full load+play session smoke test: 1 Hz transport telemetry, `--live` / `--dvr-window`, `--subs <codec-or-lang>` cue logging, and `--host-calls` mimicry of host post-load call sequences. Fails loud when the clock does not advance or a selected subtitle track produces no cues.
+
+### Fixed
+
+- **Mid-stream-joined sources no longer freeze on the first frame (#107).** A live tuner MPEG-TS opened without `isLive`, live without a DVR window, or a capture file cut mid-broadcast delivers its first samples hours past the load anchor; the combined demux loop armed the synchronizer at the load anchor (0 on a fresh load), scheduling every A/V sample far in the future. The clock now re-anchors at the first decoded sample PTS when it deviates from the load anchor by more than 2 s (`SWClockAnchorPolicy`); positions stay session-relative through the anchor's session zero while `sourceTime` rides the raw source axis, matching the native path's split.
+- **Live-DVR sessions feed subtitle packets again (#107).** The live reader loop only ring-buffered audio/video; subtitle packets never reached the session packet store, starving the overlay drainer on every live+DVR session.
+- **Host rate changes before clock arming no longer wedge the session (#107).** A `setRate` issued between `load()` and the demux loop's clock arming requested a rate at a clock time where no media will ever exist; `AVSampleBufferRenderSynchronizer`'s delayed-rate-change machinery then held the effective rate at 0 permanently. `setRate` / `pause` / play-resume now gate the synchronizer call on the armed-clock latch, and arming applies the latest host rate. `AudioOutput` logs every clock mutation.
+
 ## [5.1.0] - 2026-07-16
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.1.0))
