@@ -62,7 +62,16 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, dvrWindow: Dou
         dvrWindowSeconds: dvrWindow
     )
     do {
-        try await engine.load(url: url, options: options)
+        let probe = try await engine.load(url: url, options: options)
+        // Mirror AetherPlayer's Open URL flow: a probe-flagged live source is reloaded
+        // back-to-back on the live path (same engine instance, stopInternal in between).
+        if hostCalls.contains("reloadlive"), let probe, probe.isLive, !engine.isLive {
+            print("  HOSTCALL reload as live (probe.isLive)")
+            var liveOptions = options
+            liveOptions.isLive = true
+            liveOptions.dvrWindowSeconds = 1800
+            try await engine.load(url: url, options: liveOptions)
+        }
     } catch {
         print("LOAD FAILED: \(error)")
         return 1
@@ -81,8 +90,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, dvrWindow: Dou
         case "setrate":
             print("  HOSTCALL setRate(1.0)")
             engine.setRate(1.0)
+        case "reloadlive":
+            break  // handled at load time above
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }

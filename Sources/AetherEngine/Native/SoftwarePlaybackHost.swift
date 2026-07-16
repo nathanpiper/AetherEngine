@@ -210,9 +210,14 @@ final class SoftwarePlaybackHost {
 
     private var timeTimer: AnyCancellable?
 
-    /// Caching the chosen rate so resume() restores the right speed
-    /// after a pause without the host needing to know its history.
-    private var lastRate: Float = 1.0
+    /// Caching the chosen rate so resume() restores the right speed after a pause without the
+    /// host needing to know its history. Lock-guarded: the demux/feeder threads read it at clock
+    /// arming so a host rate change between load and arm is not lost (#107).
+    nonisolated(unsafe) private var _lastRate: Float = 1.0
+    nonisolated private var lastRate: Float {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _lastRate }
+        set { flagsLock.lock(); _lastRate = newValue; flagsLock.unlock() }
+    }
 
     /// Start position captured so the demux loop aligns the synchronizer clock to the first sample's PTS; non-zero resume without this would cause "frozen frame, no audio".
     private var initialClockTime: CMTime = .zero
@@ -409,10 +414,12 @@ final class SoftwarePlaybackHost {
     // MARK: - Transport
 
     func play() {
-        // Resume after pause() BEFORE the demuxLoopStarted flip: distinguishes real resume (clock armed) from pause-before-first-play (un-anchored clock must not tick forward via eager setRate).
+        // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
+        // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
+        // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
         if pausedByHost {
             pausedByHost = false
-            if demuxLoopStarted {
+            if clockArmed {
                 audioOutput?.setRate(lastRate)
             }
         }
@@ -468,7 +475,10 @@ final class SoftwarePlaybackHost {
     }
 
     func pause() {
-        audioOutput?.pause()
+        // Un-anchored clock: only latch the pause; the loops park on isPlaying (#107).
+        if clockArmed {
+            audioOutput?.pause()
+        }
         pausedByHost = true
         rate = 0
         isPlaying = false
@@ -492,8 +502,14 @@ final class SoftwarePlaybackHost {
 
     func setRate(_ newRate: Float) {
         lastRate = newRate
-        audioOutput?.setRate(newRate)
         rate = newRate
+        // Same rule as play(): never rate-change the un-anchored synchronizer. A host setRate
+        // right after load(), before the demux/feeder loop armed the clock, wedged the
+        // delayed-rate-change machinery and froze live sessions on the first frame; the arming
+        // seekClock picks up lastRate instead (#107).
+        if clockArmed {
+            audioOutput?.setRate(newRate)
+        }
     }
 
     func seek(to seconds: Double) async {
@@ -670,7 +686,9 @@ final class SoftwarePlaybackHost {
         let rndr = renderer
         let condition = demuxCondition
         let initialClock = initialClockTime
-        let initialRate = lastRate
+        // Read at arm time, not captured: a host setRate between load and arming must reach
+        // the anchor (the eager synchronizer call it replaced is gated on clockArmed, #107).
+        let currentRate: @Sendable () -> Float = { [weak self] in self?.lastRate ?? 1.0 }
         let ring = dvrRing
         let vTbSec = videoTimeBaseSeconds
         let aTbSec = audioTimeBaseSeconds
@@ -776,7 +794,7 @@ final class SoftwarePlaybackHost {
                     readCursor: readCursor,
                     advanceCursor: advanceCursor,
                     clampCursor: clampCursor,
-                    initialRate: initialRate,
+                    currentRate: currentRate,
                     isPlaying: getIsPlaying,
                     stopRequested: getStopRequested,
                     sourceEnded: getSourceEnded,
@@ -800,7 +818,7 @@ final class SoftwarePlaybackHost {
                 renderer: rndr,
                 condition: condition,
                 initialClockTime: initialClock,
-                initialRate: initialRate,
+                currentRate: currentRate,
                 ring: ring,
                 videoTimeBaseSeconds: vTbSec,
                 audioTimeBaseSeconds: aTbSec,
@@ -993,7 +1011,7 @@ final class SoftwarePlaybackHost {
         readCursor: @Sendable () -> Int,
         advanceCursor: @Sendable (Int) -> Void,
         clampCursor: @Sendable (Int, Int) -> Void,
-        initialRate: Float,
+        currentRate: @Sendable () -> Float,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
         sourceEnded: @Sendable () -> Bool,
@@ -1079,8 +1097,8 @@ final class SoftwarePlaybackHost {
                 let shouldArm = (audioDecoder == nil) ? pkt.isVideo : producedAudio
                 if shouldArm {
                     let armTime = CMTime(seconds: pkt.pts, preferredTimescale: 90000)
-                    // Use initialRate (not 1.0) to preserve any rate set before arming.
-                    aOut.seekClock(to: armTime, rate: initialRate)
+                    // Latest host rate, read at arm time (a setRate before arming is deferred here, #107).
+                    aOut.seekClock(to: armTime, rate: currentRate())
                     markClockArmed()
                 }
             }
@@ -1096,13 +1114,13 @@ final class SoftwarePlaybackHost {
         _ aOut: AudioOutput,
         resolution: SWClockAnchorPolicy.Resolution,
         initialClockTime: CMTime,
-        initialRate: Float,
+        rate: Float,
         onClockAnchored: @Sendable (Double) -> Void
     ) {
         let anchorTime = resolution.anchorSeconds == initialClockTime.seconds
             ? initialClockTime
             : CMTime(seconds: resolution.anchorSeconds, preferredTimescale: 90000)
-        aOut.seekClock(to: anchorTime, rate: initialRate)
+        aOut.seekClock(to: anchorTime, rate: rate)
         if resolution.anchorSeconds != initialClockTime.seconds {
             EngineLog.emit(
                 "[SWHost] clock re-anchored to first sample: anchor=\(String(format: "%.3f", resolution.anchorSeconds))s "
@@ -1125,7 +1143,7 @@ final class SoftwarePlaybackHost {
         renderer: SampleBufferRenderer,
         condition: NSCondition,
         initialClockTime: CMTime,
-        initialRate: Float,
+        currentRate: @Sendable () -> Float,
         ring: PacketRingBuffer?,
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
@@ -1315,7 +1333,7 @@ final class SoftwarePlaybackHost {
                     let resolution = SWClockAnchorPolicy.resolve(
                         initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
                     armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                             initialRate: initialRate, onClockAnchored: onClockAnchored)
+                             rate: currentRate(), onClockAnchored: onClockAnchored)
                     markClockArmed()
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
@@ -1356,7 +1374,7 @@ final class SoftwarePlaybackHost {
                         initialSeconds: initialClockTime.seconds,
                         firstSampleSeconds: firstPts.isValid ? firstPts.seconds : Double.nan)
                     armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                             initialRate: initialRate, onClockAnchored: onClockAnchored)
+                             rate: currentRate(), onClockAnchored: onClockAnchored)
                     markClockArmed()
                 }
             } else if subtitleStreamIndices.contains(streamIdx), let sink = subtitleTapSink() {
