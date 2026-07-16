@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-07-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.1.0))
+
+### Added
+
+- **Paused-background grace window on iOS (#127).** A paused session used to tear down the moment the app backgrounded, so a 10-30 s app switch paid a full pipeline rebuild. The teardown is now deferred by `backgroundTeardownGraceSeconds` (default 15 s, 0 restores the immediate teardown), held under a background-task assertion; returning inside the window resumes on the live pipeline with no reload. At expiry the background action is re-evaluated (PiP / lock-screen play can change mid-window) and the wedge-safe teardown runs while the app is still genuinely running, never across an idle suspension. A playing session with background playback disabled still tears down immediately; tvOS keeps the unconditional teardown. Thanks to dlev02 for the proposals and device logs.
+- **Public `isSessionReady` (#127).** `@Published` engine flag, true once the active session's transport is ready to accept seeks and report real time (native path: AVPlayerItem readyToPlay), false across every teardown. Hosts gate corrective actions (restore watchdogs, position clamps) on it instead of inferring readiness from `currentTime` being pinned at 0.
+
+### Fixed
+
+- **Pre-ready host seeks no longer clamp to 0:00 (#127).** A host seek forwarded while the AVPlayer item was pre-ready clamped to 0 against empty seekable ranges and replaced `load()`'s own pending start-position seek, restarting playback from the file head. Such seeks are now deferred and the latest one replays at readiness.
+
 ## [5.0.7] - 2026-07-15
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.7))
