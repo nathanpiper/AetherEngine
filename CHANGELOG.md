@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-07-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.6.1))
+
+### Fixed
+
+- **A diagnostics tick can no longer hang or kill the host app (#134).** On the native path the 1 Hz `LiveTelemetrySampler.tick` made up to six synchronous AVFoundation reads per second on the main actor; each is a sync XPC round-trip to mediaserverd, so a momentarily busy media server (a display-mode change on an HDR start, for example) parked the main thread in `mach_msg` and surfaced in production hosts as fully blocked app hangs and watchdog terminations. The reads now run as one coalesced batch (one `accessLog()`, one `currentTime()`) on a dedicated background queue, and a tick that resumes after a stop or reload seam drops its stale snapshot instead of publishing it into the new session. The same class of read existed in the 30 s memory probe (now hopped through the same helper) and in the host's `seekableEnd`, which live clock-tick sinks and the paused-live 1 Hz window timer read per call and is now a KVO mirror of `seekableTimeRanges`. As a side effect, the `[LagDiag]` line no longer pays any AVFoundation cost when verbose logging is disabled. Thanks to l984-451 for the Sentry-backed report, the exact read inventory, and the off-main fix proposal.
+
 ## [5.6.0] - 2026-07-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.6.0))
