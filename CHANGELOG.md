@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.6.2] - 2026-07-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.6.2))
+
+### Fixed
+
+- **Live H.264 channels joining mid-broadcast no longer green-flash or die with an empty playlist (#133).** On the MPEG-TS ingest path the video gate opened on any keyframe-flagged packet without confirming a decodable IDR access unit. Joining a running broadcast, that meant the decoder briefly rendered an uninitialized reference (green frame) until the real SPS/PPS/IDR arrived, or, when the probe joined before any SPS and left `codecpar` at 0x0, the first muxer allocation fed 0x0 dimensions into `avformat_write_header` (-22) and the channel produced an empty `#EXTM3U` that never recovered. A live-only pre-gate (H.264 with Annex-B framing) now withholds video until a packet carries in-band SPS + PPS and a true IDR slice, and reconstructs the muxer's dimensions from those in-band parameter sets when the probe left them unresolved. A miss is covered by the existing bounded live keyframe-gate timeout (reopen), not a terminal muxer failure. fMP4 live and VOD are unaffected.
+- **Same-format live zaps no longer pay the full display-mode settle cap (#133).** Zapping between two channels of the same format (e.g. two SDR 50 Hz channels) re-applied identical `AVDisplayCriteria`, which on unobservable-Dolby-Vision panels started a mode switch the app cannot observe and made the post-load settle wait burn its full ~3s cap on every zap. The engine now retains the last-applied criteria and skips both the redundant panel write and the settle wait when the incoming criteria are already active, cutting that redundant latency to zero. Any zap that actually changes format, rate, or dynamic range settles exactly as before. Thanks to digilearn-dev for the detailed report and reproduction.
+
 ## [5.6.1] - 2026-07-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.6.1))
