@@ -54,8 +54,12 @@ struct ClosedCaptionTapA53Tests {
         // A tap never assigned as the engine's active tap (stale/torn-down session): its detection
         // notify must be dropped, not resurrect or duplicate the track (Fix 5).
         let strayTap = ClosedCaptionTap(engine: engine, ccStreamIndex: Int32(AetherEngine.a53ClosedCaptionTrackID))
+
+        // Remove the track first to ensure the stray tap's identity guard is what prevents track
+        // resurrection, not the dedupe guard that would swallow a duplicate-append anyway.
+        engine.subtitleTracks.removeAll { $0.id == AetherEngine.a53ClosedCaptionTrackID }
         strayTap.ingestA53Ordered([triplet], ptsSeconds: 1.0)
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(engine.subtitleTracks.filter { $0.id == AetherEngine.a53ClosedCaptionTrackID }.count == 1)
+        #expect(!engine.subtitleTracks.contains { $0.id == AetherEngine.a53ClosedCaptionTrackID })
     }
 }
