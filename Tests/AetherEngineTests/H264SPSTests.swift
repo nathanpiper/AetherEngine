@@ -66,7 +66,12 @@ final class H264SPSTests: XCTestCase {
 
     func testContainsIDRHandlesThreeByteStartCodes() {
         let sc3: [UInt8] = [0, 0, 1]
-        let au = sc3 + sps720 + sc3 + pps + sc3 + [0x65, 0x88]
+        var au: [UInt8] = sc3
+        au += sps720
+        au += sc3
+        au += pps
+        au += sc3
+        au += [0x65, 0x88]
         XCTAssertTrue(withBuf(au) { H264SPS.containsIDR(fromAnnexB: $0) })
     }
 
