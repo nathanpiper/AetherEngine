@@ -21,6 +21,9 @@ enum A53SEIParser {
         case lengthPrefixed(size: Int)
     }
 
+    /// "GA94" as raw bytes; static so the per-packet prefilter allocates nothing.
+    private static let ga94Needle: [UInt8] = [0x47, 0x41, 0x39, 0x34]
+
     /// Resolve the framing once per session from codec extradata: avcC/hvcC config records start
     /// with configurationVersion 0x01 and carry lengthSizeMinusOne; Annex B extradata (or none,
     /// the MPEG-TS case) starts with a start code.
@@ -40,8 +43,7 @@ enum A53SEIParser {
     /// rejected by the structural parse in `triplets(in:...)`.
     static func mayContainA53(_ data: UnsafePointer<UInt8>, _ size: Int) -> Bool {
         guard size >= 4 else { return false }
-        let needle: [UInt8] = [0x47, 0x41, 0x39, 0x34]
-        return needle.withUnsafeBufferPointer { memmem(data, size, $0.baseAddress, $0.count) != nil }
+        return ga94Needle.withUnsafeBufferPointer { memmem(data, size, $0.baseAddress, $0.count) != nil }
     }
 
     /// All A53 `cc_data` triplets in the packet, in bitstream (decode) order.
