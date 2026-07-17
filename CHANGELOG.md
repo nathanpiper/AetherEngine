@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.5.1] - 2026-07-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.5.1))
+
+### Fixed
+
+- **Live HDR10 channels no longer fail at startup with -1002 (#130).** AVPlayer filters a `VIDEO-RANGE=PQ`/`HLG` variant without a `FRAME-RATE` attribute out of the master playlist at parse time and fails the item with NSURLErrorDomain -1002 before ever fetching the media playlist. Live MPEG-TS probes can leave `avg_frame_rate` unset, so live HDR sessions could serve exactly that master with no recovery path. The manifest frame rate now falls back to `r_frame_rate`, a source with no detectable frame rate routes media-direct instead of serving an unloadable master, and a startup -1002 while serving the master reactively falls back to the media playlist (live sessions rejoin at the edge). Thanks to digilearn-dev.
+
 ## [5.5.0] - 2026-07-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.5.0))
