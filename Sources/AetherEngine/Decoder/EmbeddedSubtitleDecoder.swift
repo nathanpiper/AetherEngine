@@ -188,7 +188,13 @@ final class EmbeddedSubtitleDecoder {
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
-                if preserveASSMarkup, let raw = SubtitleRectText.rawASSLine(for: rect) {
+                if isTeletext, let assLine = SubtitleRectText.rawASSLine(for: rect) {
+                    // Teletext decodes as ASS (txt_format=ass); parse colour runs (#107). Falls back
+                    // to plain text inside teletextBody when the page carries no colour.
+                    if let body = SubtitleRectText.teletextBody(fromASSEventLine: assLine) {
+                        bodies.append(body)
+                    }
+                } else if preserveASSMarkup, let raw = SubtitleRectText.rawASSLine(for: rect) {
                     textLines.append(raw)
                 } else if let text = SubtitleRectText.plainText(for: rect) {
                     textLines.append(text)
