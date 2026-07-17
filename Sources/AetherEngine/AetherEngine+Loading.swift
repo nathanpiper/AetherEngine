@@ -470,6 +470,7 @@ extension AetherEngine {
         // ASS; the WebVTT rendition strips at serve). #112 rework: the overlay itself is fed by the
         // packet-store drainer, not by tap-event forwarding.
         session.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
+        session.teletextPageForSubtitleTap = loadedOptions.teletextPage
         EngineLog.emit("[AetherEngine] native subtitles: prepare=\(loadedOptions.prepareNativeSubtitles) eager=\(loadedOptions.eagerNativeSubtitleReaders) textTracks=\(nativeSubtitleTrackTable.count) enable=\(session.enableNativeSubtitleTrackForSession)", category: .engine)
 
         // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.
@@ -888,6 +889,7 @@ extension AetherEngine {
         let packetStore = SubtitlePacketStore()
         self.softwareSubtitlePacketStore = packetStore
         host.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
+        host.teletextPageForSubtitleTap = loadedOptions.teletextPage
         host.subtitleTapSink = { idx, pkt, tb, assembleSplitSets in
             packetStore.harvest(streamIndex: idx, packet: pkt, timeBase: tb,
                                 assembleSplitDisplaySets: assembleSplitSets)

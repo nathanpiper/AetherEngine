@@ -174,13 +174,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return EmbeddedSubtitleDecoder(stream: stream,
                                        sourceVideoWidth: w > 0 ? w : 1920,
                                        sourceVideoHeight: h > 0 ? h : 1080,
-                                       preserveASSMarkup: preserveASSMarkupForSubtitleTap)
+                                       preserveASSMarkup: preserveASSMarkupForSubtitleTap,
+                                       teletextPage: teletextPageForSubtitleTap)
     }
 
     /// Sodalite#32 Phase 2: tap decoders honor the host's markup preference so the overlay can render
     /// styled ASS from tap-fed cues; the WebVTT rendition strips the markup at serve time instead.
     /// Set before start() (AetherEngine+Loading).
     var preserveASSMarkupForSubtitleTap = false
+    var teletextPageForSubtitleTap: Int? = nil
 
     var subtitleTapActive: Bool {
         subtitleTapLock.lock(); defer { subtitleTapLock.unlock() }
@@ -249,7 +251,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                   let decoder = EmbeddedSubtitleDecoder(stream: stream,
                                                         sourceVideoWidth: w > 0 ? w : 1920,
                                                         sourceVideoHeight: h > 0 ? h : 1080,
-                                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap)
+                                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap,
+                                                        teletextPage: teletextPageForSubtitleTap)
             else { continue }
             subtitleTapRoutes[sidx] = (decoder, nativeSubtitleCueStoresForSession[ordinal])
         }
