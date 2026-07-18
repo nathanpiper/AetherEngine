@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.0] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.0))
+
+### Added
+
+- **Hardware deinterlacing with smooth field-rate motion (#107).** Interlaced broadcast on the software-decode path (MPEG-2 / VC-1 / MPEG-4 and interlaced H.264) now deinterlaces on the GPU via `yadif_videotoolbox` (the yadif kernel as a Metal compute shader over VideoToolbox frames) and, by default, at field rate (`send_field`: 25i to 50p, 29.97i to 59.94p) for smooth motion on sport. `LoadOptions.deinterlaceMode` (default `.auto`) selects the hardware graph with a software bwdif fallback (no Metal device, an older linked FFmpeg, or a graph-build failure all fall back cleanly); `LoadOptions.deinterlaceFieldRate` (default `.field`) controls cadence. The hardware sink emits IOSurface-backed CVPixelBuffers copied GPU-side into the decoder's own pool, skipping the sws_scale copy. Requires FFmpegBuild 2.1.0 (pulled transitively), which also carries a patch balancing an over-release of the autoreleased Metal command-buffer/encoder in the upstream VT filter (a candidate for ffmpeg-devel). Adopts and thanks tresby (whose fork this ports) and nathanpiper.
+
+### Fixed
+
+- **Coloured teletext captions no longer render a leading blank line (#107).** libzvbi teletext ASS can prefix a row-positioning newline; the plain-text path trimmed it but the coloured (rich-text) path did not, so a coloured caption showed a blank line the same page without colour would not. The colour parser now edge-trims leading and trailing whitespace and newlines across the run sequence, matching the plain path (interior line breaks and colours preserved). Reported by tresby.
+
 ## [5.7.0] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.7.0))

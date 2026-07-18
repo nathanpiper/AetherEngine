@@ -40,7 +40,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Containers | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV |
 | Disc | DVD-Video and Blu-ray ISO (decrypted): selectable titles and chapters, demuxed through the normal path |
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 where HW AV1 exists |
-| Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, interlaced H.264 (AVPlayer does not deinterlace); bwdif deinterlace |
+| Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, interlaced H.264 (AVPlayer does not deinterlace); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG |
 | Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / DTS / DTS-HD MA / MP3 / Opus bridge to EAC3 5.1 (default) or lossless FLAC |
 | Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) |
@@ -170,7 +170,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "5.7.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "5.8.0")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -299,10 +299,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "5.7.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "5.8.0")
 ```
 
-Pin to `.upToNextMinor(from: "5.7.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "5.8.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
