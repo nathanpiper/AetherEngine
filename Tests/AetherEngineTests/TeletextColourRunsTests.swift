@@ -78,4 +78,38 @@ struct TeletextColourRunsTests {
         let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
         #expect(runs == [SubtitleTextRun(text: "Red\nWhite", color: SubtitleColor(r: 255, g: 0, b: 0))])
     }
+
+    @Test("interior blank line from a skipped teletext row collapses to a single break (#107)")
+    func collapsesInteriorBlankLine() {
+        // libzvbi joins teletext rows with \N; a two-line caption on non-adjacent rows (an empty
+        // row between them, used only for vertical placement) arrives as line1\N\Nline2 and would
+        // render a blank line the broadcaster never intended. It must read as two adjacent lines.
+        let line = "0,0,Default,,0,0,0,,Can you tell someone\\N\\Nthey're not a good singer?"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "Can you tell someone\nthey're not a good singer?", color: nil)])
+    }
+
+    @Test("teletextBody flattens the collapsed blank line on the plain-text path (#107)")
+    func teletextBodyCollapsesInteriorBlankLine() {
+        let line = "0,0,Default,,0,0,0,,Can you tell someone\\N\\Nthey're not a good singer?"
+        if case .text(let s)? = SubtitleRectText.teletextBody(fromASSEventLine: line) {
+            #expect(s == "Can you tell someone\nthey're not a good singer?")
+        } else {
+            Issue.record("expected text body")
+        }
+    }
+
+    @Test("multiple skipped rows collapse to a single break, colours preserved (#107)")
+    func collapsesMultipleBlankRowsColoured() {
+        let line = "0,0,Default,,0,0,0,,{\\c&H00FFFF&}Line A\\N\\N\\NLine B"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "Line A\nLine B", color: SubtitleColor(r: 255, g: 255, b: 0))])
+    }
+
+    @Test("adjacent teletext rows keep their single line break (no over-collapse)")
+    func keepsAdjacentRowBreak() {
+        let line = "0,0,Default,,0,0,0,,First line\\NSecond line"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "First line\nSecond line", color: nil)])
+    }
 }
