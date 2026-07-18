@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.4] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.4))
+
+### Fixed
+
+- **Teletext captions no longer render a blank line between two lines placed on non-adjacent rows (#107).** libzvbi joins teletext rows with `\N`, so a two-line caption whose lines sit on non-adjacent rows (an empty middle row used only for vertical placement) arrived as `line1\n\nline2` and showed a blank line the broadcaster never intended. The 5.8.0 edge-trim only removed leading and trailing newlines; interior runs of consecutive newlines now fold to a single break too, on both the plain and coloured teletext paths. Single line breaks between adjacent rows are preserved. Reported by tresby, who device-verified the 801 page override and hardware deinterlace on real AU streams in the same pass.
+
 ## [5.8.3] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.3))
