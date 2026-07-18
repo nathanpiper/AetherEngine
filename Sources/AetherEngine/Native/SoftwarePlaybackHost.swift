@@ -350,6 +350,9 @@ final class SoftwarePlaybackHost {
             }
         }
 
+        // Applied here (not init) so it also covers a decoder replaced above.
+        (videoDecoder as? SoftwareVideoDecoder)?.deinterlaceConfig = deinterlaceConfig
+
         try videoDecoder.open(stream: vStream) { [weak self] pixelBuffer, pts, hdr10PlusData in
             // Decoder callback is off-main; SampleBufferRenderer is internally locked.
             self?.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
@@ -473,6 +476,7 @@ final class SoftwarePlaybackHost {
     /// Host's ASS markup preference for overlay decoders (mirrors the HLS session flag).
     var preserveASSMarkupForSubtitleTap = false
     var teletextPageForSubtitleTap: Int? = nil
+    var deinterlaceConfig = DeinterlaceConfig()
 
     /// #112 rework: build an overlay decoder for any embedded subtitle stream, seeded from the
     /// session's video dims like the HLS tap routes. The drainer owns the returned decoder.

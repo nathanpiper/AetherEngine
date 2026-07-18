@@ -856,6 +856,10 @@ extension AetherEngine {
     ) async throws {
         activateRendererAudioSession()
         let host = SoftwarePlaybackHost()
+        host.deinterlaceConfig = DeinterlaceConfig(
+            mode: loadedOptions.deinterlaceMode,
+            fieldRate: loadedOptions.deinterlaceFieldRate
+        )
         host.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
         }

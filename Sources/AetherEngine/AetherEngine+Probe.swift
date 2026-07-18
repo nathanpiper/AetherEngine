@@ -139,6 +139,8 @@ extension AetherEngine {
         let height = stream.pointee.codecpar.pointee.height
 
         let decoder = SoftwareVideoDecoder()
+        // Probe decodes a handful of frames and throws them away: no Metal pipeline for that.
+        decoder.deinterlaceConfig = DeinterlaceConfig(mode: .software)
         // Class for captured-by-reference mutable accumulators; the onFrame closure fires SYNCHRONOUSLY on this same
         // thread inside avcodec_send_packet / receive_frame (the probe drives decode inline, no demux thread). The
         // DecodedFrameHandler is @Sendable for the off-actor playback path, so this single-threaded capture is an
