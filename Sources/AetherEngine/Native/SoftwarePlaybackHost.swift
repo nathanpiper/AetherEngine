@@ -472,6 +472,7 @@ final class SoftwarePlaybackHost {
 
     /// Host's ASS markup preference for overlay decoders (mirrors the HLS session flag).
     var preserveASSMarkupForSubtitleTap = false
+    var teletextPageForSubtitleTap: Int? = nil
 
     /// #112 rework: build an overlay decoder for any embedded subtitle stream, seeded from the
     /// session's video dims like the HLS tap routes. The drainer owns the returned decoder.
@@ -483,7 +484,8 @@ final class SoftwarePlaybackHost {
         return EmbeddedSubtitleDecoder(stream: stream,
                                        sourceVideoWidth: w > 0 ? w : 1920,
                                        sourceVideoHeight: h > 0 ? h : 1080,
-                                       preserveASSMarkup: preserveASSMarkupForSubtitleTap)
+                                       preserveASSMarkup: preserveASSMarkupForSubtitleTap,
+                                       teletextPage: teletextPageForSubtitleTap)
     }
 
     func pause() {

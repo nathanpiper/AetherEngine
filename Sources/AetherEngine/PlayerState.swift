@@ -196,6 +196,11 @@ public struct LoadOptions: Sendable, Equatable {
     /// waypoint; the host resumes later with `play()`. Same declared-vs-real family as #122/#123 (#124).
     public var autoplay: Bool = true
 
+    /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
+    /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page
+    /// libzvbi does not flag as a subtitle page. Only affects teletext streams (#107).
+    public var teletextPage: Int? = nil
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -221,7 +226,8 @@ public struct LoadOptions: Sendable, Equatable {
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
         forwardBufferSegments: Int? = nil,
-        autoplay: Bool = true
+        autoplay: Bool = true,
+        teletextPage: Int? = nil
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -245,6 +251,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.externalSubtitles = externalSubtitles
         self.forwardBufferSegments = forwardBufferSegments
         self.autoplay = autoplay
+        self.teletextPage = teletextPage
     }
 }
 
@@ -487,7 +494,23 @@ public struct MediaMetadata: Sendable, Equatable {
     }
 }
 
-/// Decoded subtitle cue (start/end in container seconds). Payload is plain text (SubRip / ASS / SSA / WebVTT / mov_text) or a rendered bitmap (PGS / DVB / HDMV) with position normalized against the source video frame.
+/// Straight (non-premultiplied) RGB for a coloured subtitle run. Reusable for teletext (#107)
+/// and future ASS colour work. nil on a run means "inherit the host's foreground preference".
+public struct SubtitleColor: Sendable, Equatable {
+    public let r: UInt8
+    public let g: UInt8
+    public let b: UInt8
+    public init(r: UInt8, g: UInt8, b: UInt8) { self.r = r; self.g = g; self.b = b }
+}
+
+/// One contiguous same-colour span of a rich-text cue.
+public struct SubtitleTextRun: Sendable, Equatable {
+    public let text: String
+    public let color: SubtitleColor?
+    public init(text: String, color: SubtitleColor?) { self.text = text; self.color = color }
+}
+
+/// Decoded subtitle cue (start/end in container seconds). Payload is plain text (SubRip / ASS / SSA / WebVTT / mov_text), coloured rich text (teletext / ASS colour tags), or a rendered bitmap (PGS / DVB / HDMV) with position normalized against the source video frame.
 /// Both paths land in the same `subtitleCues` array, so the host renders
 /// them with one switch in the overlay view.
 public struct SubtitleCue: Identifiable, Sendable {
@@ -499,6 +522,7 @@ public struct SubtitleCue: Identifiable, Sendable {
     public enum Body: Sendable {
         case text(String)
         case image(SubtitleImage)
+        case richText([SubtitleTextRun])
     }
 
     public init(id: Int, startTime: Double, endTime: Double, body: Body) {
@@ -508,10 +532,13 @@ public struct SubtitleCue: Identifiable, Sendable {
         self.body = body
     }
 
-    /// nil for bitmap cues.
+    /// Plain text for text and rich-text cues (rich runs concatenated); nil for bitmap cues.
     public var text: String? {
-        if case .text(let s) = body { return s }
-        return nil
+        switch body {
+        case .text(let s): return s
+        case .richText(let runs): return runs.map(\.text).joined()
+        case .image: return nil
+        }
     }
 }
 
