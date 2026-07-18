@@ -69,4 +69,13 @@ struct TeletextColourRunsTests {
         let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
         #expect(runs == [SubtitleTextRun(text: "Redstill", color: SubtitleColor(r: 255, g: 0, b: 0))])
     }
+
+    @Test("leading/trailing newlines are edge-trimmed across coloured runs (no blank line)")
+    func edgeTrimsColouredRuns() {
+        // libzvbi teletext ass can prefix a row-positioning newline; a coloured cue must not
+        // render a blank line the plain path already trims. Interior line breaks are kept.
+        let line = "0,0,Default,,0,0,0,,\\N{\\c&H0000FF&}Red\\NWhite\\N"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "Red\nWhite", color: SubtitleColor(r: 255, g: 0, b: 0))])
+    }
 }

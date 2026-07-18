@@ -108,10 +108,25 @@ enum SubtitleRectText {
         }
         flush()
 
-        let cleaned = runs.filter { !$0.text.isEmpty }
-        // Drop empty runs; a cue that is only whitespace yields nil (real trimming of the
-        // flattened text happens in teletextBody's .text branch).
-        guard cleaned.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
+        var cleaned = runs.filter { !$0.text.isEmpty }
+        // Edge-trim leading/trailing whitespace and newlines across the run sequence so a coloured
+        // cue matches the plain path (teletextBody flattens + trims the .text case). libzvbi
+        // teletext ass can prefix a row-positioning newline that would otherwise render as a blank
+        // line ONLY on coloured cues (#107). Interior runs and line breaks are kept; colours preserved.
+        while let first = cleaned.first {
+            let d = String(first.text.drop(while: { $0 == " " || $0 == "\t" || $0 == "\n" }))
+            if d.isEmpty { cleaned.removeFirst(); continue }
+            cleaned[0] = SubtitleTextRun(text: d, color: first.color)
+            break
+        }
+        while let last = cleaned.last {
+            var s = last.text
+            while let c = s.last, c == " " || c == "\t" || c == "\n" { s.removeLast() }
+            if s.isEmpty { cleaned.removeLast(); continue }
+            cleaned[cleaned.count - 1] = SubtitleTextRun(text: s, color: last.color)
+            break
+        }
+        guard !cleaned.isEmpty else { return nil }
         return cleaned
     }
 
