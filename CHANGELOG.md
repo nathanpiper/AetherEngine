@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.1] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.1))
+
+### Fixed
+
+- **Dolby Vision P7 conversion failures degrade to clean HDR10 instead of shipping mixed-profile DV (#135).** When libdovi cannot convert a P7 RPU to P8.1 on the loopback-HLS producer path, the offending RPU (and its enhancement-layer NAL) is now dropped rather than muxed through, so the affected frame plays as the clean HDR10 base instead of riding a P7 RPU inside a container already declared 8.1. Well-formed remuxes never reach this path and are unaffected. Field notes from rrgomes.
+
+### Added
+
+- **Full Enhancement Layer (FEL) sources are logged during P7 to P8.1 conversion (#135).** The first RPU's enhancement-layer type is probed once; a FEL source (whose enhancement layer is discarded in the single-layer conversion, unlike a MEL source where the drop is lossless) now emits a one-line log, so a flatter-looking FEL disc can be triaged against a native P7 player. Also surfaced on `DoviConvertProbeResult.enhancementLayerType` for `aetherctl dovitest` validation. Thanks to rrgomes.
+
 ## [5.8.0] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.0))
