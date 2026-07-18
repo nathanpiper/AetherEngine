@@ -3,8 +3,12 @@ import Libavutil
 import Libavfilter
 @testable import AetherEngine
 
-/// Regression: bwdif/yadif halve the filter output time_base and double PTS; DeinterlaceFilter.pull
-/// must rescale back into stream time_base or playback runs at half speed and resume freezes.
+/// Regression: bwdif/yadif halve the filter output time_base and double PTS. The filter exposes
+/// that sink time_base as `outputTimeBase` and the decoder timestamps filtered frames with it
+/// (rescaling back into the stream base is WRONG under mode=send_field: the two fields of a frame
+/// sit on odd/even ticks of the halved base and would collapse to duplicate integer PTS).
+/// This test pins the invariant that output PTS converted through `outputTimeBase` lands on the
+/// source's real-time axis, the original bug was playback at half speed + resume freezes.
 struct DeinterlaceTimebaseTests {
 
     private func makeFrame(pts: Int64) -> UnsafeMutablePointer<AVFrame> {
@@ -18,13 +22,17 @@ struct DeinterlaceTimebaseTests {
         return f
     }
 
-    @Test("Deinterlaced frame PTS stays on the stream time_base (no 2x drift)")
+    @Test("Software deinterlaced PTS via outputTimeBase stays on the stream's time axis (no 2x drift)")
     func deinterlacedPTSMatchesStreamTimebase() {
-        // 1 tick == 1/30 s; source PTS N must emerge as N (not 2N) on the stream time_base.
+        // 1 tick == 1/30 s; source PTS N must emerge at N/30 seconds when converted through
+        // the filter's outputTimeBase (NOT the stream time_base, bwdif halves it).
         let streamTB = AVRational(num: 1, den: 30)
         let tbSeconds = Double(streamTB.num) / Double(streamTB.den)
 
         let filter = DeinterlaceFilter()
+        // Force the CPU engine: this regression is about the sw bwdif/yadif time_base contract,
+        // and must stay deterministic whether or not the linked build ships yadif_videotoolbox.
+        filter.config = DeinterlaceConfig(mode: .software)
         defer { filter.teardown() }
 
         let inputPTS: [Int64] = [0, 1, 2, 3, 4, 5, 6, 7]
@@ -43,9 +51,11 @@ struct DeinterlaceTimebaseTests {
             var ff: UnsafeMutablePointer<AVFrame>? = f
             av_frame_free(&ff)
 
+            let outTB = filter.outputTimeBase
+            let outTBSeconds = Double(outTB.num) / Double(outTB.den)
             while filter.pull(into: out) >= 0 {
                 if out.pointee.pts != Int64.min {
-                    outSeconds.append(Double(out.pointee.pts) * tbSeconds)
+                    outSeconds.append(Double(out.pointee.pts) * outTBSeconds)
                 }
                 av_frame_unref(out)
             }
@@ -57,15 +67,16 @@ struct DeinterlaceTimebaseTests {
         let maxInput = Double(inputPTS.max()!) * tbSeconds
         for s in outSeconds {
             #expect(s <= maxInput + tbSeconds * 0.5,
-                    "output PTS \(s)s exceeds source range (max \(maxInput)s), time_base doubled")
+                    "output PTS \(s)s exceeds source range (max \(maxInput)s), time_base drift")
         }
 
+        // send_frame: one output per input, so spacing stays at the frame interval.
         let sorted = outSeconds.sorted()
         if sorted.count >= 2 {
             for i in 1..<sorted.count {
                 let delta = sorted[i] - sorted[i - 1]
                 #expect(abs(delta - tbSeconds) < tbSeconds * 0.25,
-                        "frame spacing \(delta)s is not ~\(tbSeconds)s (time_base doubled)")
+                        "frame spacing \(delta)s is not ~\(tbSeconds)s (time_base drift)")
             }
         }
     }
