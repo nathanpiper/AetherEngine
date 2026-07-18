@@ -112,7 +112,8 @@ enum SubtitleRectText {
         // Edge-trim leading/trailing whitespace and newlines across the run sequence so a coloured
         // cue matches the plain path (teletextBody flattens + trims the .text case). libzvbi
         // teletext ass can prefix a row-positioning newline that would otherwise render as a blank
-        // line ONLY on coloured cues (#107). Interior runs and line breaks are kept; colours preserved.
+        // line ONLY on coloured cues (#107). Interior blank lines are folded separately below;
+        // single line breaks and colours are preserved.
         while let first = cleaned.first {
             let d = String(first.text.drop(while: { $0 == " " || $0 == "\t" || $0 == "\n" }))
             if d.isEmpty { cleaned.removeFirst(); continue }
@@ -126,8 +127,36 @@ enum SubtitleRectText {
             cleaned[cleaned.count - 1] = SubtitleTextRun(text: s, color: last.color)
             break
         }
+        cleaned = collapseInteriorBlankLines(cleaned)
         guard !cleaned.isEmpty else { return nil }
         return cleaned
+    }
+
+    /// Collapse interior blank lines across a run sequence (#107). libzvbi joins teletext rows with
+    /// `\N`, so a caption whose lines sit on non-adjacent rows (an empty row between them, used only
+    /// for vertical placement) arrives as `line1\n\nline2` and would render a blank line the
+    /// broadcaster never intended. Consecutive newlines (optionally separated by horizontal
+    /// whitespace) fold to one; single line breaks and colours are preserved. The empty row lands
+    /// inside a single run in practice, but a colour change at a row boundary could split it, so the
+    /// boundary between adjacent runs is folded too.
+    private static func collapseInteriorBlankLines(_ runs: [SubtitleTextRun]) -> [SubtitleTextRun] {
+        var folded = runs.map { run in
+            SubtitleTextRun(
+                text: run.text.replacingOccurrences(
+                    of: #"\n(?:[ \t]*\n)+"#, with: "\n", options: .regularExpression),
+                color: run.color
+            )
+        }
+        var i = 0
+        while i < folded.count - 1 {
+            if folded[i].text.hasSuffix("\n") {
+                var next = folded[i + 1].text
+                while next.hasPrefix("\n") { next.removeFirst() }
+                folded[i + 1] = SubtitleTextRun(text: next, color: folded[i + 1].color)
+            }
+            i += 1
+        }
+        return folded.filter { !$0.text.isEmpty }
     }
 
     /// Body for a teletext rect's ASS line: `.richText` when any run is coloured, `.text` (flattened)
