@@ -10,9 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.8] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.8))
+
 ### Fixed
 
-- **PacketRingBuffer.close() now deletes on a background queue.** PacketRingBuffer.close() is now idempotent and dispatches scratch-directory removal to a background queue so filesystem I/O never blocks the caller. This was causing 5–30 s stalls on long live TV streams on close.
+- **Exiting a long live DVR channel no longer freezes the UI for several seconds.** `PacketRingBuffer.close()` collected every spooled packet file and deleted them one at a time on the calling thread; a live software-host stream held open for minutes spools tens of thousands of files, so the O(n) filesystem walk stalled the caller (5-30 s) and, on the main actor, blocked channel switching. `close()` is now idempotent (the in-RAM index is cleared synchronously under the lock, so the ring is immediately unusable) and dispatches the scratch-directory removal to a background queue, so filesystem I/O never blocks the caller. Every spooled file lives under the per-instance scratch dir, so a single recursive removal covers them all. Reported and fixed by Nathan Piper (nathanpiper).
 
 ## [5.8.7] - 2026-07-19
 
